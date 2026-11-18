@@ -18,20 +18,39 @@ from app.core.exceptions import DomainError
 from app.core.logging import configure_logging, new_request_id, request_id_var
 from app.core.settings import settings
 from app.db.engine import session_factory
+from app.repositories import transfers as transfer_repo
 
 logger = logging.getLogger("transfer-core.reconcile")
 access_logger = logging.getLogger("transfer-core.http")
 
 
 async def reconcile_loop() -> None:
-    from app.services.reconcile import reconcile_once
+    from app.services.reconcile import list_open_transfers, reconcile_transfer
 
     while True:
         try:
             async with session_factory() as session:
-                stats = await reconcile_once(session, settings, now_utc())
-                await session.commit()
-                logger.info("reconcile pass", extra={"status": stats})
+                pending = await list_open_transfers(session)
+            semaphore = asyncio.Semaphore(8)
+
+            async def run_one(transfer_id, sem=semaphore) -> dict:
+                async with sem, session_factory() as session:
+                    transfer = await transfer_repo.get_transfer(session, transfer_id)
+                    if transfer is None:
+                        return {}
+                    stats = await reconcile_transfer(session, settings, transfer, now_utc())
+                    await session.commit()
+                    return stats
+
+            batches = await asyncio.gather(
+                *[run_one(item.transfer_id) for item in pending], return_exceptions=True
+            )
+            total = {"checked": 0, "completed": 0, "failed": 0, "still_open": 0}
+            for batch in batches:
+                if isinstance(batch, dict):
+                    for key in total:
+                        total[key] += batch.get(key, 0)
+            logger.info("reconcile pass", extra={"status": total})
         except asyncio.CancelledError:
             raise
         except Exception as exc:

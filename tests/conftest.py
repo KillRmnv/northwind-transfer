@@ -56,7 +56,11 @@ async def ensure_test_database() -> None:
 @pytest.fixture()
 async def engine() -> AsyncIterator:
     await ensure_test_database()
-    eng = create_async_engine(database_url(), poolclass=NullPool)
+    url = database_url()
+    if url.startswith("sqlite"):
+        eng = create_async_engine(url, poolclass=NullPool)
+    else:
+        eng = create_async_engine(url, pool_size=20, max_overflow=10, pool_timeout=60)
     yield eng
     await eng.dispose()
 

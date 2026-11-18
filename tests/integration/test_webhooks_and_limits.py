@@ -259,3 +259,65 @@ async def test_async_failed_falls_back_without_reconcile(
         assert len(body["attempts"]) == 2
     with check:
         assert body["attempts"][0]["status"] == "FAILED"
+
+
+async def test_missing_signature_returns_401(api) -> None:
+    raw = event("ffffffffffffffff", "COMPLETED", "ev-nosig", "2026-11-05T12:00:00Z")
+    response = await api.post("/webhooks/prov_alpha", content=raw)
+    with check:
+        assert response.status_code == 401
+    with check:
+        assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+async def test_concurrent_same_key_one_transfer(api, freeze_rates, live_rates, monkeypatch) -> None:
+    quote = await make_quote(api, freeze_rates, live_rates)
+    patch_provider(
+        monkeypatch, create=accept_factory("po-conc"), get=complete_getter(), find=no_find
+    )
+
+    async def submit():
+        return await post_transfer(api, quote["quote_id"], key="conc-key")
+
+    results = await asyncio.gather(*[submit() for _ in range(5)])
+    ids = {r.json().get("transfer_id") for r in results if r.status_code < 500}
+    with check:
+        assert len(ids) == 1
+    with check:
+        assert all(r.status_code in (201, 202) for r in results)
+    balance = (await api.get("/clients/c_001/balance")).json()
+    with check:
+        assert balance["balances"]["RUB"]["available"] == "490000.00"
+
+
+async def test_reconcile_completes_lost_webhook(
+    api, session, freeze_rates, live_rates, monkeypatch
+) -> None:
+    from app.core.clock import now_utc
+    from app.core.settings import settings as app_settings
+    from app.services.reconcile import reconcile_once
+
+    quote = await make_quote(api, freeze_rates, live_rates)
+
+    async def processing_get(self, provider_id, payout_id):
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="PROCESSING", failure_code=None
+        )
+
+    patch_provider(monkeypatch, create=accept_factory("po-lost"), get=processing_get, find=no_find)
+    created = await post_transfer(api, quote["quote_id"], key="lost-key")
+    with check:
+        assert created.status_code == 202
+
+    patch_provider(monkeypatch, get=complete_getter())
+    await session.commit()
+    stats = await reconcile_once(session, app_settings, now_utc())
+    await session.commit()
+    with check:
+        assert stats["completed"] >= 1
+    got = (await api.get(f"/transfers/{created.json()['transfer_id']}")).json()
+    with check:
+        assert got["status"] == "COMPLETED"
+    balance = (await api.get("/clients/c_001/balance")).json()
+    with check:
+        assert balance["balances"]["RUB"]["reserved"] == "0.00"

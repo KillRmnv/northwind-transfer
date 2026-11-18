@@ -16,7 +16,7 @@ from app.core.exceptions import (
 )
 from app.core.money import format_money
 from app.core.settings import Settings
-from app.core.types import PayoutState
+from app.core.types import PayoutState, UnknownResult
 from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 from app.repositories.quotes import get_quote
@@ -49,9 +49,12 @@ async def resolve_unknown(
 
     for _ in range(attempts):
         await asyncio.sleep(delay)
-        found = await client.find_payout(provider_id, reference)
-        if found is not None:
-            return found
+        outcome, state = await client.probe_payout(provider_id, reference)
+        if outcome == "found":
+            return state
+        if outcome == "error":
+            continue
+        return None
     return None
 
 
@@ -90,8 +93,8 @@ async def create_with_recovery(
         return outcome
     if not isinstance(outcome, UnknownOutcome):
         return outcome
-    for _ in range(4):
-        found = await resolve_unknown(client, provider_id, reference, attempts=1, delay=1.5)
+    for _ in range(3):
+        found = await resolve_unknown(client, provider_id, reference, attempts=1, delay=1.0)
         if found is not None:
             return found
         retry = await client.create_payout(
@@ -105,7 +108,7 @@ async def create_with_recovery(
         )
         if isinstance(retry, (AcceptedOutcome, DeclinedOutcome)):
             return retry
-    return await resolve_unknown(client, provider_id, reference, attempts=6, delay=2.5)
+    return await resolve_unknown(client, provider_id, reference, attempts=4, delay=2.0)
 
 
 async def live_rates_map(settings: Settings) -> dict[tuple[str, str], RateData]:
@@ -362,6 +365,23 @@ async def run_attempts(
             )
             await session.commit()
             continue
+        if isinstance(outcome, UnknownResult):
+            await transfer_repo.record_attempt(
+                session,
+                transfer.transfer_id,
+                provider.provider_id,
+                reference,
+                Decimal(quote.target_amount),
+                quote.target_currency,
+                "PROCESSING",
+                "NEEDS_REVIEW",
+                attempt_no,
+                None,
+                now,
+            )
+            await transfer_repo.set_status(session, transfer, "PROCESSING", now)
+            await session.commit()
+            return "PROCESSING"
         found = outcome if isinstance(outcome, PayoutState) else None
         if found is not None and found.status == "FAILED":
             await transfer_repo.record_attempt(

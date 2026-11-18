@@ -200,6 +200,12 @@ class ProviderClient:
         return _parse_state(response.json())
 
     async def find_payout(self, provider_id: str, reference: str) -> PayoutState | None:
+        outcome, state = await self.probe_payout(provider_id, reference)
+        return state if outcome == "found" else None
+
+    async def probe_payout(
+        self, provider_id: str, reference: str
+    ) -> tuple[str, PayoutState | None]:
         try:
             async with self._client() as client:
                 response = await client.get(
@@ -207,10 +213,12 @@ class ProviderClient:
                     params={"reference": reference},
                 )
         except (httpx.TransportError, httpx.TimeoutException):
-            return None
+            return "error", None
+        if response.status_code == 404:
+            return "missing", None
         if response.status_code != 200:
-            return None
-        return _parse_state(response.json())
+            return "error", None
+        return "found", _parse_state(response.json())
 
 
 def _parse_state(payload: dict) -> PayoutState:

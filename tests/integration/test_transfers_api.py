@@ -48,6 +48,12 @@ def patch_provider(monkeypatch, create=None, get=None, find=None):
     if find is not None:
         monkeypatch.setattr(providers_module.ProviderClient, "find_payout", find)
 
+        async def probe(self, provider_id, reference, _find=find):
+            state = await _find(self, provider_id, reference)
+            return ("found" if state is not None else "missing"), state
+
+        monkeypatch.setattr(providers_module.ProviderClient, "probe_payout", probe)
+
 
 def accept_factory(payout_id="po_test_1"):
     async def fake_create(self, *args, **kwargs):

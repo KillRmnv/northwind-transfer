@@ -48,7 +48,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "C4", "SIM"]
 ignore = ["S101", "S104", "S105", "S106", "S107", "B008", "UP017"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106", "S603", "S607"]
+"tests/**" = ["S105", "S106", "S603", "S607", "ASYNC221"]
 "mock_provider/**" = ["S105"]
 
 [tool.importlinter]

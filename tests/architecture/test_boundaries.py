@@ -14,6 +14,8 @@ def test_layered_architecture_contracts() -> None:
         assert result.returncode == 0, output
     with check:
         assert "0 broken" in output
+    with check:
+        assert "Contracts: 2 kept" in output
 
 
 def test_services_do_not_import_fastapi() -> None:
