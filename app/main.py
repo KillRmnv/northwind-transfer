@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
 from app.api.exception_handlers import (
@@ -15,10 +15,12 @@ from app.api.v1.transfers import router as transfers_router
 from app.api.v1.webhooks import router as webhooks_router
 from app.core.clock import now_utc
 from app.core.exceptions import DomainError
+from app.core.logging import configure_logging, new_request_id, request_id_var
 from app.core.settings import settings
 from app.db.engine import session_factory
 
 logger = logging.getLogger("transfer-core.reconcile")
+access_logger = logging.getLogger("transfer-core.http")
 
 
 async def reconcile_loop() -> None:
@@ -27,8 +29,9 @@ async def reconcile_loop() -> None:
     while True:
         try:
             async with session_factory() as session:
-                await reconcile_once(session, settings, now_utc())
+                stats = await reconcile_once(session, settings, now_utc())
                 await session.commit()
+                logger.info("reconcile pass", extra={"status": stats})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -38,6 +41,7 @@ async def reconcile_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging(settings.log_level)
     task = None
     if settings.env != "test":
         task = asyncio.create_task(reconcile_loop())
@@ -55,6 +59,32 @@ def create_app() -> FastAPI:
     app.add_exception_handler(DomainError, domain_error_handler)
     app.add_exception_handler(RequestValidationError, request_validation_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        request_id = new_request_id()
+        token = request_id_var.set(request_id)
+        try:
+            response = await call_next(request)
+        except Exception:
+            access_logger.exception(
+                "request failed",
+                extra={"method": request.method, "path": request.url.path},
+            )
+            request_id_var.reset(token)
+            raise
+        access_logger.info(
+            "request completed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+            },
+        )
+        request_id_var.reset(token)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
     app.include_router(quotes_router, prefix="/api/v1")
     app.include_router(transfers_router, prefix="/api/v1")
     app.include_router(webhooks_router, prefix="/api/v1")

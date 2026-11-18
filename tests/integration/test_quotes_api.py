@@ -129,3 +129,11 @@ async def test_quote_not_found(api) -> None:
         assert response.status_code == 404
     with check:
         assert response.json()["error"]["code"] == "QUOTE_NOT_FOUND"
+
+
+async def test_request_id_header_present(api) -> None:
+    response = await api.get("/health")
+    with check:
+        assert response.status_code == 200
+    with check:
+        assert len(response.headers["x-request-id"]) == 16

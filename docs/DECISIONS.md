@@ -149,6 +149,16 @@ PK справочников — коды (`VARCHAR(3)` для валют, `VARCH
 
 Причина: chaos-прогон на 60 переводах дал `RESULT: OK` только после детерминированного ключа и атомарной финализации — до этого было 9 двойных выплат. Это подтверждает D7 и D10 на практике.
 
+## D22. Логирование с маскировкой секретов и мапперы
+
+- Логи — структурированный JSON (`app/core/logging.py`): `ts`, `level`, `logger`, `message`, `request_id` + поля `method/path/status/transfer_id/provider_id`.
+- `request_id` пробрасывается через `ContextVar` и возвращается клиенту заголовком `X-Request-ID`.
+- Маскировка: `RedactingFilter` + `JsonFormatter` заменяют на `*****` значения по ключам (`password`, `secret`, `token`, `api_key`, `authorization`, `x-signature`, `cookie`, `private_key`) и по шаблонам (`Bearer …`, `key=value`, JSON-пары). Маскируется уже собранное сообщение, чтобы не ломать `%s`-плейсхолдеры.
+- uvicorn access-log отключён (`--no-access-log`): он печатает query string и заголовки сырыми, то есть утекает `?token=…`. Наш middleware логирует только путь без query.
+- Мапперы — `app/api/mappers.py`: ORM/DTO → ответы (`QuoteResponse`, `TransferResponse`, `BalanceResponse`). Роуты больше не собирают ответы вручную.
+
+Причина: утечка токена в логах — это провал проверки, а не косметика; access-log uvicorn это делал буквально. Отдельный слой мапперов держит `api` тонким и убирает дублирование форматирования денег.
+
 ## D20. Стартовый набор — вендорный код без правок
 
 `data/`, `examples/`, `scripts/chaos_run.py` и `mock_provider/` взяты из `transfer-core-starter` без изменения логики. Единственная адаптация — запуск мок-провайдера через `uv run python -m mock_provider.main` (вместо `pip install -r requirements.txt`), как требует D13. `aiohttp` добавлен в зависимости. Код мок-провайдера исключён из ruff как вендорный.

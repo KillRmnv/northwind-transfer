@@ -6,35 +6,27 @@ import httpx
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.mappers import quote_row_to_response, quote_to_response
 from app.core.clock import now_utc
-from app.core.exceptions import (
-    QuoteNotFoundError,
-    RateUnavailableError,
-    ValidationError,
-)
-from app.core.money import amount_string_is_valid, format_money
+from app.core.exceptions import QuoteNotFoundError, RateUnavailableError, ValidationError
+from app.core.money import amount_string_is_valid
 from app.core.settings import settings
 from app.db.engine import get_session
 from app.repositories.quotes import get_quote as load_quote
 from app.repositories.quotes import save_quote
 from app.repositories.references import load_minor_units, load_tariffs
-from app.schemas.quotes import ErrorResponse, Money, QuoteRequest, QuoteResponse
+from app.schemas.quotes import ErrorResponse, QuoteRequest, QuoteResponse
 from app.services.quotes import (
     amount_in_limit_currency,
     calculate_source,
     calculate_target,
     check_limits,
     find_direction,
-    format_rate,
     resolve_rate,
 )
 from app.services.rates import RatesClient
 
 router = APIRouter(tags=["quotes"])
-
-
-def _money(amount: Decimal, currency: str, minor_units: dict[str, int]) -> Money:
-    return Money(amount=format_money(amount, minor_units[currency]), currency=currency)
 
 
 @router.post(
@@ -101,17 +93,7 @@ async def create_quote(
     expires_at = now + timedelta(seconds=tariff.quote_ttl_sec)
     quote_id = await save_quote(session, result, expires_at, now)
     response.headers["Location"] = f"/quotes/{quote_id}"
-    return QuoteResponse(
-        quote_id=str(quote_id),
-        direction_id=result.direction_id,
-        source_amount=_money(result.source_amount, result.source_currency, minor_units),
-        fee=_money(result.fee_amount, result.fee_currency, minor_units),
-        amount_to_convert=_money(result.amount_to_convert, result.source_currency, minor_units),
-        rate=format_rate(result.rate),
-        target_amount=_money(result.target_amount, result.target_currency, minor_units),
-        breakdown=result.breakdown,
-        expires_at=expires_at,
-    )
+    return quote_to_response(str(quote_id), result, minor_units, expires_at)
 
 
 @router.get(
@@ -128,14 +110,4 @@ async def read_quote(quote_id: UUID, session: AsyncSession = Depends(get_session
     if row is None:
         raise QuoteNotFoundError(str(quote_id))
     minor_units = await load_minor_units(session)
-    return QuoteResponse(
-        quote_id=str(row.quote_id),
-        direction_id=row.direction_id,
-        source_amount=_money(row.source_amount, row.source_currency, minor_units),
-        fee=_money(row.fee_amount, row.fee_currency, minor_units),
-        amount_to_convert=_money(row.amount_to_convert, row.source_currency, minor_units),
-        rate=format_rate(row.rate),
-        target_amount=_money(row.target_amount, row.target_currency, minor_units),
-        breakdown=[],
-        expires_at=row.expires_at,
-    )
+    return quote_row_to_response(row, minor_units)

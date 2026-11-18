@@ -111,3 +111,11 @@ uv run python scripts/chaos_run.py --transfers 60 --api http://localhost:8080 \
 - `docs/starter-notes.md` — данные, мок-провайдер, хаос.
 - `docs/test-cases/` — перенесённые из Java-референса сценарии.
 - `docs/er_diagram.puml` + `er_diagram.svg` — схема БД.
+
+## Логи
+
+Логи — JSON в stdout, с `request_id` (также в заголовке ответа `X-Request-ID`). Секреты маскируются: `Authorization`, `X-Signature`, `password`, `token`, `api_key`, `secret`, `cookie` и `Bearer …` превращаются в `*****`. Access-log uvicorn отключён, чтобы query string не утекал в обход маскировки.
+
+```json
+{"ts":"2026-11-18T22:41:47+0000","level":"INFO","logger":"transfer-core.http","message":"request completed","request_id":"c3417f1fdd95405d","method":"POST","path":"/quotes","status":201}
+```

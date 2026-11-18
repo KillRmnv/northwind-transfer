@@ -3,52 +3,21 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.mappers import balances_to_response, transfer_to_response
 from app.core.clock import now_utc
 from app.core.exceptions import DomainError, TransferNotFoundError, ValidationError
-from app.core.money import format_money
 from app.core.settings import settings
 from app.db.engine import get_session
+from app.models.tables import Client
+from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 from app.repositories.references import load_minor_units
-from app.schemas.balances import BalanceResponse, CurrencyBalance
+from app.schemas.balances import BalanceResponse
 from app.schemas.quotes import ErrorResponse
-from app.schemas.transfers import Attempt, HistoryEntry, TransferRequest, TransferResponse
+from app.schemas.transfers import TransferRequest, TransferResponse
 from app.services import transfers as transfer_service
 
 router = APIRouter(tags=["transfers"])
-
-
-def to_response(transfer, attempts, history, minor_units: dict[str, int]) -> TransferResponse:
-    latest_provider = next((a.provider_id for a in reversed(attempts) if a.payout_id), None)
-    return TransferResponse(
-        transfer_id=str(transfer.transfer_id),
-        quote_id=str(transfer.quote_id),
-        client_id=transfer.client_id,
-        status=transfer.status,
-        source_amount={
-            "amount": format_money(transfer.source_amount, minor_units[transfer.source_currency]),
-            "currency": transfer.source_currency,
-        },
-        target_amount={
-            "amount": format_money(transfer.target_amount, minor_units[transfer.target_currency]),
-            "currency": transfer.target_currency,
-        },
-        provider_id=latest_provider,
-        attempts=[
-            Attempt(
-                provider_id=a.provider_id,
-                payout_id=a.payout_id,
-                status=a.status,
-                failure_code=a.failure_code,
-                attempt_no=a.attempt_no,
-                created_at=a.created_at,
-            )
-            for a in attempts
-        ],
-        history=[HistoryEntry(status=item[0], at=item[1], actor=item[2]) for item in history],
-        created_at=transfer.created_at,
-        updated_at=transfer.updated_at,
-    )
 
 
 async def build_history(session: AsyncSession, transfer) -> list[tuple]:
@@ -73,7 +42,6 @@ async def build_history(session: AsyncSession, transfer) -> list[tuple]:
     responses={
         201: {"description": "Перевод завершён синхронно"},
         202: {"description": "Перевод принят, итог позже"},
-        400: {"model": ErrorResponse, "description": "INSUFFICIENT_FUNDS"},
         404: {"model": ErrorResponse, "description": "QUOTE_NOT_FOUND"},
         409: {"model": ErrorResponse, "description": "INSUFFICIENT_FUNDS, DAILY_LIMIT_EXCEEDED"},
         410: {"model": ErrorResponse, "description": "QUOTE_EXPIRED"},
@@ -113,7 +81,7 @@ async def create_transfer(
         response.headers["Location"] = f"/transfers/{fresh.transfer_id}"
     else:
         response.status_code = status.HTTP_202_ACCEPTED
-    return to_response(fresh, attempts, history, minor_units)
+    return transfer_to_response(fresh, attempts, history, minor_units)
 
 
 @router.get(
@@ -134,7 +102,7 @@ async def read_transfer(
     minor_units = await load_minor_units(session)
     history = await build_history(session, transfer)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-    return to_response(transfer, attempts, history, minor_units)
+    return transfer_to_response(transfer, attempts, history, minor_units)
 
 
 @router.get(
@@ -145,23 +113,9 @@ async def read_transfer(
 async def read_balance(
     client_id: str, session: AsyncSession = Depends(get_session)
 ) -> BalanceResponse:
-    from app.models.tables import Client
-    from app.repositories import balances as balance_repo
-    from app.repositories.references import load_minor_units as load_minor
-
     client = await session.get(Client, client_id)
     if client is None:
         raise ValidationError(f"unknown client {client_id}")
     rows = await balance_repo.get_balances(session, client_id)
-    minor_units = await load_minor(session)
-    return BalanceResponse(
-        client_id=client_id,
-        balances={
-            currency: CurrencyBalance(
-                currency=currency,
-                available=format_money(row.available, minor_units[currency]),
-                reserved=format_money(row.reserved, minor_units[currency]),
-            )
-            for currency, row in rows.items()
-        },
-    )
+    minor_units = await load_minor_units(session)
+    return balances_to_response(client_id, rows, minor_units)
