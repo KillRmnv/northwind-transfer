@@ -135,3 +135,11 @@ PK справочников — коды (`VARCHAR(3)` для валют, `VARCH
 `UNIQUE`: `currencies.code`, `transfers.idempotency_key`, `webhook_events.event_id`, `limit_definitions(client, scope, period)`. Индексы: `(client_id, created_at)` и `(client_id, category, created_at)` на `transfers` под скользящие окна; `(provider_id, direction_id)` на `provider_directions`; `(provider_id, from_at, to_at)` на `maintenance_windows`; `(reference)` на `payout_attempts` под сверку и вебхуки. Схема держит пессимистику: строки `balances` и `transfers` блокируются через `SELECT … FOR UPDATE` по PK.
 
 Причина: окна 7/16 дней и часовой лимит — агрегаты по дате, без индексов они деградируют первыми под нагрузкой. `UNIQUE` — вторая линия обороны идемпотентности после проверки в сервисе.
+
+## D20. Стартовый набор — вендорный код без правок
+
+`data/`, `examples/`, `scripts/chaos_run.py` и `mock_provider/` взяты из `transfer-core-starter` без изменения логики. Единственная адаптация — запуск мок-провайдера через `uv run python -m mock_provider.main` (вместо `pip install -r requirements.txt`), как требует D13. `aiohttp` добавлен в зависимости. Код мок-провайдера исключён из ruff как вендорный.
+
+Причина: стартовый набор — входные данные задачи, а не наш код; правки в нём искажают проверку. `payment-stack-starter` — другой набор (Vault, RabbitMQ, worker, reporting), к Transfer Core не относится и не переносится.
+
+Последствия данных, которые схема обязана выдержать: `minor_units` от 0 до 3 (JPY/VND/KWD), `charged_in=TARGET`, лимиты клиента в валюте, отличной от баланса, отсутствующие и протухшие курсы, выключенный провайдер и окно обслуживания. Детали — `docs/starter-notes.md`.

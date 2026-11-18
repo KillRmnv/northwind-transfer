@@ -1,0 +1,98 @@
+name: transfer-core
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-transfer}
+      POSTGRES_USER: ${DB_USER:-transfer}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-transfer}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-16MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}
+      - -c
+      - temp_buffers=${PG_TEMP_BUFFERS:-16MB}
+      - -c
+      - wal_buffers=${PG_WAL_BUFFERS:-16MB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - random_page_cost=${PG_RANDOM_PAGE_COST:-1.1}
+      - -c
+      - effective_io_concurrency=${PG_EFFECTIVE_IO_CONCURRENCY:-200}
+    shm_size: 1gb
+    ports:
+      - "${DB_PORT_HOST:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-transfer} -d ${DB_NAME:-transfer}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mock-provider:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - uv
+      - run
+      - --frozen
+      - python
+      - -m
+      - mock_provider.main
+    environment:
+      MOCK_MODE: ${MOCK_MODE:-normal}
+      MOCK_SEED: ${MOCK_SEED:-1}
+      MOCK_SCENARIO: ${MOCK_SCENARIO:-ok}
+      MOCK_SLOW_SEC: ${MOCK_SLOW_SEC:-30}
+      MOCK_SETTLE_SEC: ${MOCK_SETTLE_SEC:-2}
+      PROVIDER_WEBHOOK_SECRET: ${PROVIDER_WEBHOOK_SECRET:-local-dev-webhook-secret}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data:ro
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2)"
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_PROFILE: ${DB_PROFILE:-postgres}
+      DB_HOST: db
+      DB_PORT: "5432"
+      MOCK_PROVIDER_URL: http://mock-provider:9000
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-provider:
+        condition: service_healthy
+
+volumes:
+  pgdata:
