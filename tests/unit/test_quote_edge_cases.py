@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from pytest_check import check
 
 from app.core import exceptions
 from app.services import quotes as service
@@ -88,9 +89,12 @@ def test_target_never_underpays_three_decimal_source() -> None:
 def test_target_roundtrip_for_all_directions_matches_examples() -> None:
     so = service.calculate_source(Decimal("10000.00"), tariff(), RATES[("RUB", "THB")], MINOR)
     back = service.calculate_target(so.target_amount, tariff(), RATES[("RUB", "THB")], MINOR)
-    assert back.source_amount == so.source_amount
-    assert back.target_amount == so.target_amount
-    assert back.fee_amount == so.fee_amount
+    with check:
+        assert back.source_amount == so.source_amount
+    with check:
+        assert back.target_amount == so.target_amount
+    with check:
+        assert back.fee_amount == so.fee_amount
 
 
 @pytest.mark.parametrize("bad", [Decimal("0"), Decimal("-1"), Decimal("NaN")])

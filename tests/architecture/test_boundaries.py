@@ -1,5 +1,7 @@
 import subprocess
 
+from pytest_check import check
+
 
 def test_layered_architecture_contracts() -> None:
     import shutil
@@ -8,8 +10,10 @@ def test_layered_architecture_contracts() -> None:
     assert executable is not None
     result = subprocess.run([executable], capture_output=True, text=True)
     output = result.stdout + result.stderr
-    assert result.returncode == 0, output
-    assert "0 broken" in output
+    with check:
+        assert result.returncode == 0, output
+    with check:
+        assert "0 broken" in output
 
 
 def test_services_do_not_import_fastapi() -> None:

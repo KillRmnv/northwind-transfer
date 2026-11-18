@@ -2,6 +2,8 @@ import io
 import json
 import logging
 
+from pytest_check import check
+
 from app.core.logging import (
     JsonFormatter,
     RedactingFilter,
@@ -25,16 +27,20 @@ def test_redacts_bearer_tokens() -> None:
         "test", logging.INFO, __file__, 1, "call with Authorization: Bearer abc.def.ghi", None, None
     )
     payload = json.loads(capture(record))
-    assert "abc.def.ghi" not in payload["message"]
-    assert "*****" in payload["message"]
+    with check:
+        assert "abc.def.ghi" not in payload["message"]
+    with check:
+        assert "*****" in payload["message"]
 
 
 def test_redacts_key_value_secrets() -> None:
     text = "password=hunter2 token: abc123 api_key=deadbeef"
     redacted = redact_text(text)
     for secret in ("hunter2", "abc123", "deadbeef"):
-        assert secret not in redacted
-    assert redacted.count("*****") == 3
+        with check:
+            assert secret not in redacted
+    with check:
+        assert redacted.count("*****") == 3
 
 
 def test_redacts_dict_fields() -> None:
@@ -46,11 +52,16 @@ def test_redacts_dict_fields() -> None:
             "items": [{"access_token": "tok"}],
         }
     )
-    assert payload["provider_webhook_secret"] == "*****"
-    assert payload["headers"]["X-Signature"] == "*****"
-    assert payload["items"][0]["access_token"] == "*****"
-    assert payload["client_id"] == "c_001"
-    assert payload["headers"]["Accept"] == "application/json"
+    with check:
+        assert payload["provider_webhook_secret"] == "*****"
+    with check:
+        assert payload["headers"]["X-Signature"] == "*****"
+    with check:
+        assert payload["items"][0]["access_token"] == "*****"
+    with check:
+        assert payload["client_id"] == "c_001"
+    with check:
+        assert payload["headers"]["Accept"] == "application/json"
 
 
 def test_redacts_log_args() -> None:
@@ -64,8 +75,10 @@ def test_redacts_log_args() -> None:
         None,
     )
     payload = json.loads(capture(record))
-    assert "s3cr3t" not in payload["message"]
-    assert "prov_alpha" in payload["message"]
+    with check:
+        assert "s3cr3t" not in payload["message"]
+    with check:
+        assert "prov_alpha" in payload["message"]
 
 
 def test_redacts_signature_header_value() -> None:
@@ -79,12 +92,16 @@ def test_redacts_signature_header_value() -> None:
         None,
     )
     payload = json.loads(capture(record))
-    assert "abc123" not in payload["message"]
-    assert "application/json" in payload["message"]
+    with check:
+        assert "abc123" not in payload["message"]
+    with check:
+        assert "application/json" in payload["message"]
 
 
 def test_configure_logging_installs_redacting_handler() -> None:
     configure_logging("DEBUG")
     root = logging.getLogger()
-    assert root.handlers
-    assert any(isinstance(item, RedactingFilter) for item in root.handlers[0].filters)
+    with check:
+        assert root.handlers
+    with check:
+        assert any(isinstance(item, RedactingFilter) for item in root.handlers[0].filters)

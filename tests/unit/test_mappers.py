@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from pytest_check import check
+
 from app.api import mappers
 from app.core.types import QuoteResult
 from app.schemas.quotes import Money
@@ -24,10 +26,14 @@ def test_quote_to_response_formats_by_minor_units() -> None:
     response = mappers.quote_to_response(
         "q-1", result, MINOR, datetime(2026, 11, 5, tzinfo=timezone.utc)
     )
-    assert response.source_amount == Money(amount="10000.00", currency="RUB")
-    assert response.target_amount == Money(amount="4137.00", currency="THB")
-    assert response.rate == "0.4200"
-    assert response.breakdown == ["step"]
+    with check:
+        assert response.source_amount == Money(amount="10000.00", currency="RUB")
+    with check:
+        assert response.target_amount == Money(amount="4137.00", currency="THB")
+    with check:
+        assert response.rate == "0.4200"
+    with check:
+        assert response.breakdown == ["step"]
 
 
 def test_quote_to_response_keeps_zero_decimals() -> None:
@@ -58,5 +64,7 @@ def test_balances_to_response_keeps_available_and_reserved() -> None:
         reserved = Decimal("10000.00")
 
     response = mappers.balances_to_response("c_001", {"RUB": Row()}, MINOR)
-    assert response.balances["RUB"].available == "490000.00"
-    assert response.balances["RUB"].reserved == "10000.00"
+    with check:
+        assert response.balances["RUB"].available == "490000.00"
+    with check:
+        assert response.balances["RUB"].reserved == "10000.00"

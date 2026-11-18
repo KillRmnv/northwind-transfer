@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from pytest_check import check
+
 from app.core.types import ProviderInfo, Window
 from app.services.providers import (
     convert_amount,
@@ -79,7 +81,8 @@ def test_multi_hop_with_inverse_leg() -> None:
     }
     converted = convert_amount(Decimal("909000"), "VND", "EUR", rates)
     assert converted is not None
-    assert converted.quantize(Decimal("0.01")) == Decimal("33.33")
+    with check:
+        assert converted.quantize(Decimal("0.01")) == Decimal("33.33")
 
 
 def test_scoring_prefers_margin_then_success() -> None:
@@ -126,5 +129,7 @@ def test_margin_floor_filters_unprofitable() -> None:
 def test_target_currency_zero_decimals_format() -> None:
     from app.core.money import format_money
 
-    assert format_money(Decimal("18658.4"), 0) == "18658"
-    assert format_money(Decimal("1.5"), 3) == "1.500"
+    with check:
+        assert format_money(Decimal("18658.4"), 0) == "18658"
+    with check:
+        assert format_money(Decimal("1.5"), 3) == "1.500"
