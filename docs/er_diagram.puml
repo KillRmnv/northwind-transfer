@@ -1,0 +1,203 @@
+@startuml er_diagram
+' Transfer Core — первая версия схемы по SPEC.md и Backend.md, нотация Мартина (Crow's Foot).
+' Справочники и статусы — отдельными таблицами, без DB ENUM.
+' Подписи сущностей, полей и связей — на русском. Типы колонок — как в БД.
+' Правило: КАЖДАЯ колонка с валютой — FK к Валюты, КАЖДЫЙ статус — FK к своему справочнику.
+' Все связи валют нарисованы явно.
+
+!theme plain
+skinparam defaultFontName "DejaVu Sans"
+scale 1.2
+
+title ER-диаграмма Transfer Core (3НФ, Crow's Foot)
+
+entity "Валюты" as currencies {
+  * код : VARCHAR(3) <<PK>>
+  --
+  * знаки_после_запятой : SMALLINT
+}
+
+entity "Страны" as countries {
+  * код : VARCHAR(2) <<PK>>
+}
+
+entity "Способы выплаты" as payout_methods {
+  * код : VARCHAR(32) <<PK>>
+}
+
+entity "Направления" as directions {
+  * направление_id : VARCHAR(32) <<PK>>
+  --
+  * страна_отправки : VARCHAR(2) <<FK>>
+  * валюта_отправки : VARCHAR(3) <<FK>>
+  * страна_получения : VARCHAR(2) <<FK>>
+  * валюта_получения : VARCHAR(3) <<FK>>
+  * способ_выплаты : VARCHAR(32) <<FK>>
+  * комиссия_процент : NUMERIC(8,5)
+  * комиссия_фикс : NUMERIC(20,8)
+  * комиссия_минимум : NUMERIC(20,8)
+  * комиссия_взимается_в : VARCHAR(8)
+  * мин_сумма : NUMERIC(20,8)
+  * макс_сумма : NUMERIC(20,8)
+  * валюта_лимита : VARCHAR(3) <<FK>>
+  * мин_маржа_процент : NUMERIC(8,5)
+  * котировка_ттл_сек : INTEGER
+}
+
+entity "Провайдеры" as providers {
+  * провайдер_id : VARCHAR(32) <<PK>>
+  --
+  * валюта : VARCHAR(3) <<FK>>
+  * комиссия_процент : NUMERIC(8,5)
+  * комиссия_фикс : NUMERIC(20,8)
+  * лимит_мин : NUMERIC(20,8)
+  * лимит_макс : NUMERIC(20,8)
+  * успешность_24ч : NUMERIC(6,5)
+  * задержка_p95_мс : INTEGER
+  * включён : BOOLEAN
+}
+
+entity "Направления провайдеров" as provider_directions {
+  * провайдер_id : VARCHAR(32) <<FK>>
+  * направление_id : VARCHAR(32) <<FK>>
+}
+
+entity "Окна обслуживания" as maintenance_windows {
+  * окно_id : BIGSERIAL <<PK>>
+  --
+  * провайдер_id : VARCHAR(32) <<FK>>
+  * начало : TIMESTAMPTZ
+  * конец : TIMESTAMPTZ
+}
+
+entity "Клиенты" as clients {
+  * клиент_id : VARCHAR(32) <<PK>>
+  --
+  * дневной_лимит_сумма : NUMERIC(20,8)
+  * дневной_лимит_валюта : VARCHAR(3) <<FK>>
+}
+
+entity "Балансы" as balances {
+  * клиент_id : VARCHAR(32) <<FK>>
+  * валюта : VARCHAR(3) <<FK>>
+  --
+  * доступно : NUMERIC(20,8)
+  * в_резерве : NUMERIC(20,8)
+}
+
+entity "Котировки" as quotes {
+  * котировка_id : UUID <<PK>>
+  --
+  * направление_id : VARCHAR(32) <<FK>>
+  * сумма_отправки : NUMERIC(20,8)
+  * валюта_отправки : VARCHAR(3) <<FK>>
+  * сумма_комиссии : NUMERIC(20,8)
+  * валюта_комиссии : VARCHAR(3) <<FK>>
+  * сумма_к_конвертации : NUMERIC(20,8)
+  * курс : NUMERIC(20,8)
+  * сумма_получения : NUMERIC(20,8)
+  * валюта_получения : VARCHAR(3) <<FK>>
+  * истекает : TIMESTAMPTZ
+  * создана : TIMESTAMPTZ
+}
+
+entity "Статусы переводов" as transfer_statuses {
+  * код : VARCHAR(24) <<PK>>
+}
+
+entity "Переводы" as transfers {
+  * перевод_id : UUID <<PK>>
+  --
+  * котировка_id : UUID <<FK>>
+  * клиент_id : VARCHAR(32) <<FK>>
+  * статус : VARCHAR(24) <<FK>>
+  * сумма_отправки : NUMERIC(20,8)
+  * валюта_отправки : VARCHAR(3) <<FK>>
+  * сумма_получения : NUMERIC(20,8)
+  * валюта_получения : VARCHAR(3) <<FK>>
+  * получатель_имя : VARCHAR(255)
+  * получатель_счёт : VARCHAR(64)
+  * получатель_банк : VARCHAR(32)
+  * ключ_идемпотентности : VARCHAR(128) <<UQ>>
+  * хеш_идемпотентности : VARCHAR(64)
+  * создан : TIMESTAMPTZ
+  * обновлён : TIMESTAMPTZ
+}
+
+entity "Статусы попыток" as attempt_statuses {
+  * код : VARCHAR(24) <<PK>>
+}
+
+entity "Попытки выплат" as payout_attempts {
+  * попытка_id : BIGSERIAL <<PK>>
+  --
+  * перевод_id : UUID <<FK>>
+  * провайдер_id : VARCHAR(32) <<FK>>
+  * выплата_id : VARCHAR(64)
+  * референс : VARCHAR(64)
+  * сумма : NUMERIC(20,8)
+  * валюта : VARCHAR(3) <<FK>>
+  * статус : VARCHAR(24) <<FK>>
+  * код_ошибки : VARCHAR(64)
+  * номер_попытки : INTEGER
+  * создана : TIMESTAMPTZ
+  * обновлена : TIMESTAMPTZ
+}
+
+entity "События вебхуков" as webhook_events {
+  * событие_id : VARCHAR(64) <<PK>>
+  --
+  * провайдер_id : VARCHAR(32) <<FK>>
+  * выплата_id : VARCHAR(64)
+  * референс : VARCHAR(64)
+  * статус : VARCHAR(24) <<FK>>
+  * произошло : TIMESTAMPTZ
+  * получено : TIMESTAMPTZ
+}
+
+entity "Типы периодов лимитов" as limit_period_types {
+  * код : VARCHAR(16) <<PK>>
+}
+
+entity "Определения лимитов" as limit_definitions {
+  * лимит_id : BIGSERIAL <<PK>>
+  --
+  * клиент_id : VARCHAR(32) <<FK>>
+  * область : VARCHAR(64)
+  * направление_id : VARCHAR(32) <<FK, NULL>>
+  * категория : VARCHAR(64) <<NULL>>
+  * тип_периода : VARCHAR(16) <<FK>>
+  * дней_в_окне : INTEGER <<NULL>>
+  * сумма : NUMERIC(20,8)
+  * валюта : VARCHAR(3) <<FK>>
+  * вес : NUMERIC(8,5)
+  * активен : BOOLEAN
+}
+
+currencies ||--o{ directions : "валюта отправки / получения / лимита"
+currencies ||--o{ providers : "валюта провайдера"
+currencies ||--o{ clients : "валюта дневного лимита"
+currencies ||--o{ balances : "номинал баланса"
+currencies ||--o{ quotes : "валюты котировки"
+currencies ||--o{ transfers : "валюты перевода"
+currencies ||--o{ payout_attempts : "валюта выплаты"
+currencies ||--o{ limit_definitions : "валюта лимита"
+countries ||--o{ directions : "страна отправки / получения"
+payout_methods ||--o{ directions : "способ выплаты"
+directions ||--o{ provider_directions : "обслуживается"
+providers ||--o{ provider_directions : "обслуживает"
+providers ||--o{ maintenance_windows : "имеет окна"
+clients ||--o{ balances : "владеет"
+clients ||--o{ transfers : "создаёт"
+quotes ||--o{ transfers : "рассчитан по"
+transfer_statuses ||--o{ transfers : "состояние"
+transfers ||--o{ payout_attempts : "исполняется через"
+providers ||--o{ payout_attempts : "выполняет"
+attempt_statuses ||--o{ payout_attempts : "состояние"
+attempt_statuses ||--o{ webhook_events : "состояние события"
+providers ||--o{ webhook_events : "уведомляет"
+clients ||--o{ limit_definitions : "ограничен"
+limit_period_types ||--o{ limit_definitions : "период"
+directions ||--o{ limit_definitions : "область действия"
+
+@enduml
