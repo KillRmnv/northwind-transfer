@@ -55,17 +55,24 @@ def resolve_rate(
         return Decimal("1")
     limit_sec = min(ttl_sec, RATE_STALE_AFTER_HOURS * 3600)
     direct = rates.get((source_currency, target_currency))
-    if direct is not None and _fresh(direct, now, limit_sec):
-        return direct.rate
+    if direct is not None:
+        if not _valid_rate(direct.rate):
+            raise RateUnavailableError(f"invalid rate {source_currency} -> {target_currency}")
+        if _fresh(direct, now, limit_sec):
+            return direct.rate
+        raise RateUnavailableError(f"rate {source_currency} -> {target_currency} is stale")
     inverse = rates.get((target_currency, source_currency))
-    if inverse is not None and inverse.rate != 0 and _fresh(inverse, now, limit_sec):
-        return Decimal("1") / inverse.rate
+    if inverse is not None:
+        if not _valid_rate(inverse.rate):
+            raise RateUnavailableError(f"invalid rate {target_currency} -> {source_currency}")
+        if _fresh(inverse, now, limit_sec):
+            return Decimal("1") / inverse.rate
     best: tuple[Decimal, datetime] | None = None
     for (base, quote), first in rates.items():
-        if base != source_currency or first.rate == 0:
+        if base != source_currency or not _valid_rate(first.rate):
             continue
         second = rates.get((quote, target_currency))
-        if second is None:
+        if second is None or not _valid_rate(second.rate):
             continue
         if not _fresh(first, now, limit_sec) or not _fresh(second, now, limit_sec):
             continue
@@ -75,6 +82,10 @@ def resolve_rate(
     if best is None:
         raise RateUnavailableError(f"no rate {source_currency} -> {target_currency}")
     return best[0]
+
+
+def _valid_rate(rate: Decimal) -> bool:
+    return rate.is_finite() and rate > 0
 
 
 def _fresh(data: RateData, now: datetime, limit_sec: float) -> bool:
@@ -160,21 +171,28 @@ def calculate_target(
     breakdown = [
         f"direction {tariff.direction_id}, mode TARGET, rate {format_rate(rate)}",
     ]
-    if rate == 0:
-        raise RateUnavailableError(f"rate {src} -> {tgt} is zero")
+    if not _valid_rate(rate):
+        raise RateUnavailableError(f"invalid rate {src} -> {tgt}")
     quantum_src = Decimal("1") if minor_units[src] == 0 else Decimal("1." + "0" * minor_units[src])
     if charged_in_source:
         to_convert_exact = amount / rate
-        fee_guess = to_convert_exact * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
         fee_min_q = _quant(tariff.fee_min, src, minor_units)
-        if _quant(fee_guess, src, minor_units) >= fee_min_q:
-            source_raw = (to_convert_exact + tariff.fee_fixed) / (
-                Decimal("1") - tariff.fee_percent / Decimal("100")
+        percent_candidate = (
+            (to_convert_exact + tariff.fee_fixed)
+            / (Decimal("1") - tariff.fee_percent / Decimal("100"))
+        ).quantize(quantum_src, rounding=ROUND_CEILING)
+        profit_candidate = percent_candidate
+        forward = calculate_source(profit_candidate, tariff, rate, minor_units)
+        if forward.fee_amount < fee_min_q:
+            profit_candidate = (to_convert_exact + tariff.fee_min).quantize(
+                quantum_src, rounding=ROUND_CEILING
             )
-        else:
-            source_raw = to_convert_exact + tariff.fee_min
-        source = source_raw.quantize(quantum_src, rounding=ROUND_CEILING)
-        forward = calculate_source(source, tariff, rate, minor_units)
+            forward = calculate_source(profit_candidate, tariff, rate, minor_units)
+            if forward.fee_amount < fee_min_q:
+                profit_candidate = (to_convert_exact + fee_min_q).quantize(
+                    quantum_src, rounding=ROUND_CEILING
+                )
+                forward = calculate_source(profit_candidate, tariff, rate, minor_units)
         return QuoteResult(
             direction_id=forward.direction_id,
             source_amount=forward.source_amount,
@@ -187,15 +205,27 @@ def calculate_target(
             target_currency=forward.target_currency,
             breakdown=breakdown + forward.breakdown,
         )
-    gross_exact_fee = amount * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
     fee_min_q = _quant(tariff.fee_min, tgt, minor_units)
-    if _quant(gross_exact_fee, tgt, minor_units) >= fee_min_q:
-        gross = (amount + tariff.fee_fixed) / (Decimal("1") - tariff.fee_percent / Decimal("100"))
-    else:
-        gross = amount + tariff.fee_min
-    source_raw = gross / rate
-    source = source_raw.quantize(quantum_src, rounding=ROUND_CEILING)
-    forward = calculate_source(source, tariff, rate, minor_units)
+    percent_gross = (amount + tariff.fee_fixed) / (
+        Decimal("1") - tariff.fee_percent / Decimal("100")
+    )
+    percent_source = (percent_gross / rate).quantize(quantum_src, rounding=ROUND_CEILING)
+    forward = calculate_source(percent_source, tariff, rate, minor_units)
+    if forward.fee_amount < fee_min_q:
+        min_source = ((amount + fee_min_q) / rate).quantize(quantum_src, rounding=ROUND_CEILING)
+        forward = calculate_source(min_source, tariff, rate, minor_units)
+    return QuoteResult(
+        direction_id=forward.direction_id,
+        source_amount=forward.source_amount,
+        source_currency=forward.source_currency,
+        fee_amount=forward.fee_amount,
+        fee_currency=forward.fee_currency,
+        amount_to_convert=forward.amount_to_convert,
+        rate=forward.rate,
+        target_amount=forward.target_amount,
+        target_currency=forward.target_currency,
+        breakdown=breakdown + forward.breakdown,
+    )
     return QuoteResult(
         direction_id=forward.direction_id,
         source_amount=forward.source_amount,

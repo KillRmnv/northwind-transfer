@@ -266,6 +266,7 @@ async def test_webhook_completes_transfer(api, freeze_rates, live_rates, monkeyp
     created = await post_transfer(api, quote["quote_id"], key="key-wh")
     with check:
         assert created.status_code == 202
+    patch_provider(monkeypatch, get=complete_getter())
     transfer_id = created.json()["transfer_id"]
     raw = json.dumps(
         {

@@ -22,11 +22,12 @@ def database_url() -> str:
         return explicit
     if os.environ.get("DB_PROFILE") == "sqlite":
         return "sqlite+aiosqlite:///var/test.sqlite3"
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
     return (
         "postgresql+asyncpg://"
         f"{os.environ.get('DB_USER', 'transfer')}:{os.environ.get('DB_PASSWORD', 'transfer')}"
         f"@{os.environ.get('DB_HOST', 'localhost')}:{os.environ.get('DB_PORT', '5433')}"
-        "/transfer_test"
+        f"/transfer_test_{worker}"
     )
 
 
@@ -43,11 +44,11 @@ async def ensure_test_database() -> None:
         database="postgres",
     )
     try:
-        exists = await connection.fetchval(
-            "select 1 from pg_database where datname = 'transfer_test'"
-        )
+        worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+        name = f"transfer_test_{worker}"
+        exists = await connection.fetchval("select 1 from pg_database where datname = $1", name)
         if not exists:
-            await connection.execute("create database transfer_test")
+            await connection.execute(f'create database "{name}"')
     finally:
         await connection.close()
 

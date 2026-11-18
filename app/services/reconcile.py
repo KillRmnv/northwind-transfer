@@ -21,7 +21,7 @@ async def reconcile_once(session: AsyncSession, settings: Settings, now: datetim
             stats["completed" if status == "COMPLETED" else "still_open"] += 1
             continue
         attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-        live = [a for a in attempts if a.payout_id]
+        live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
         if not live:
             status = await run_attempts(session, settings, transfer.transfer_id, now_utc())
             stats["completed" if status == "COMPLETED" else "still_open"] += 1
@@ -31,6 +31,10 @@ async def reconcile_once(session: AsyncSession, settings: Settings, now: datetim
         if state is None and attempt.payout_id:
             state = await client.find_payout(attempt.provider_id, transfer.transfer_id.hex)
         if state is None:
+            stats["still_open"] += 1
+            continue
+        fresh = await transfer_repo.get_transfer(session, transfer.transfer_id)
+        if fresh is not None and fresh.status in TERMINAL:
             stats["still_open"] += 1
             continue
         if attempt.status != state.status or attempt.payout_id != state.payout_id:

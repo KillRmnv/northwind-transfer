@@ -72,6 +72,16 @@ def test_cross_rate_conversion() -> None:
     assert convert_amount(Decimal("1000"), "RUB", "KWD", RATES) == Decimal("0.0037")
 
 
+def test_multi_hop_with_inverse_leg() -> None:
+    rates = {
+        ("RUB", "VND"): Decimal("300"),
+        ("RUB", "EUR"): Decimal("0.011"),
+    }
+    converted = convert_amount(Decimal("909000"), "VND", "EUR", rates)
+    assert converted is not None
+    assert converted.quantize(Decimal("0.01")) == Decimal("33.33")
+
+
 def test_scoring_prefers_margin_then_success() -> None:
     rich = provider(
         "rich", fee_percent=Decimal("0.01"), fee_fixed=Decimal("0.01"), success_rate=Decimal("0.99")

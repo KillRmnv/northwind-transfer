@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import as_utc, now_utc
@@ -157,15 +158,6 @@ async def create_transfer(
     from app.models.tables import Client
 
     minor_units = await load_minor_units(session)
-    quote = await get_quote(session, quote_id)
-    if quote is None:
-        raise QuoteNotFoundError(str(quote_id))
-    if as_utc(quote.expires_at) <= as_utc(now):
-        raise QuoteExpiredError(str(quote_id))
-    client = await session.get(Client, client_id)
-    if client is None:
-        raise ValidationError(f"unknown client {client_id}")
-
     body = {
         "quote_id": str(quote_id),
         "client_id": client_id,
@@ -179,6 +171,14 @@ async def create_transfer(
 
             raise IdempotencyConflictError(idempotency_key)
         return existing, False
+    client = await session.get(Client, client_id)
+    if client is None:
+        raise ValidationError(f"unknown client {client_id}")
+    quote = await get_quote(session, quote_id)
+    if quote is None:
+        raise QuoteNotFoundError(str(quote_id))
+    if as_utc(quote.expires_at) <= as_utc(now):
+        raise QuoteExpiredError(str(quote_id))
 
     rates = await live_rates_map(settings)
     simple = simple_rates(rates)
@@ -205,6 +205,7 @@ async def create_transfer(
         quote.target_currency,
         minor_units,
         now,
+        simple,
     )
     await limit_service.check_limit_definitions(
         session,
@@ -217,10 +218,21 @@ async def create_transfer(
         now,
     )
     await balance_repo.reserve(session, client_id, source_currency, source_amount)
-    transfer = await transfer_repo.create_transfer(
-        session, quote, client_id, recipient, idempotency_key, digest, now
-    )
-    await session.commit()
+    try:
+        transfer = await transfer_repo.create_transfer(
+            session, quote, client_id, recipient, idempotency_key, digest, now
+        )
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        winner = await transfer_repo.get_by_idempotency_key(session, idempotency_key)
+        if winner is None:
+            raise
+        if winner.idempotency_hash != digest:
+            from app.core.exceptions import IdempotencyConflictError
+
+            raise IdempotencyConflictError(idempotency_key) from None
+        return winner, False
     return transfer, True
 
 
@@ -237,14 +249,35 @@ async def run_attempts(
     if transfer.status in TERMINAL:
         return transfer.status
     quote = await get_quote(session, transfer.quote_id)
+    client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
+    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
+    if live:
+        last = live[-1]
+        return await wait_for_settlement(
+            session,
+            settings,
+            client,
+            transfer.transfer_id,
+            last.provider_id,
+            last.payout_id or "",
+            reference_for(transfer.transfer_id),
+            now,
+        )
     tariffs = await load_tariffs(session)
     tariff = next(t for t in tariffs if t.direction_id == quote.direction_id)
     rates = await live_rates_map(settings)
     simple = simple_rates(rates)
+    client_fee_source = Decimal(quote.fee_amount)
+    if quote.fee_currency != quote.source_currency and quote.rate and Decimal(quote.rate) != 0:
+        if quote.fee_currency == quote.target_currency:
+            client_fee_source = client_fee_source / Decimal(quote.rate)
+        else:
+            client_fee_source = Decimal("0")
     scored = await select_providers(
         session,
         tariff.direction_id,
-        Decimal(quote.fee_amount),
+        client_fee_source,
         Decimal(quote.source_amount),
         quote.source_currency,
         Decimal(quote.target_amount),
@@ -259,22 +292,7 @@ async def run_attempts(
 
         await finalize_mod.fail_transfer(session, settings, transfer, now)
         await session.commit()
-        return transfer.status
-    client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-    live = [a for a in attempts if a.payout_id]
-    if live:
-        last = live[-1]
-        return await wait_for_settlement(
-            session,
-            settings,
-            client,
-            transfer.transfer_id,
-            last.provider_id,
-            last.payout_id or "",
-            reference_for(transfer.transfer_id),
-            now,
-        )
+        return "FAILED"
     start_no = len(attempts) + 1
     reference = reference_for(transfer.transfer_id)
     callback_url = f"{settings.public_base_url}/webhooks/{{provider_id}}"
@@ -284,7 +302,9 @@ async def run_attempts(
         "account": transfer.recipient_account,
         "bank_code": transfer.recipient_bank,
     }
-    for offset, scored_item in enumerate(scored):
+    tried = {a.provider_id for a in attempts}
+    remaining = [item for item in scored if item.provider.provider_id not in tried]
+    for offset, scored_item in enumerate(remaining):
         attempt_no = start_no + offset
         provider = scored_item.provider
         outcome = await create_with_recovery(
@@ -313,7 +333,7 @@ async def run_attempts(
             )
             await transfer_repo.set_status(session, transfer, "PROCESSING", now)
             await session.commit()
-            return await wait_for_settlement(
+            settlement = await wait_for_settlement(
                 session,
                 settings,
                 client,
@@ -323,6 +343,9 @@ async def run_attempts(
                 reference,
                 now,
             )
+            if settlement == "RETRY":
+                continue
+            return settlement
         if isinstance(outcome, Declined):
             await transfer_repo.record_attempt(
                 session,
@@ -372,7 +395,7 @@ async def run_attempts(
             )
             await transfer_repo.set_status(session, transfer, "PROCESSING", now)
             await session.commit()
-            return await wait_for_settlement(
+            settlement = await wait_for_settlement(
                 session,
                 settings,
                 client,
@@ -382,6 +405,9 @@ async def run_attempts(
                 reference,
                 now,
             )
+            if settlement == "RETRY":
+                continue
+            return settlement
         await transfer_repo.record_attempt(
             session,
             transfer.transfer_id,
@@ -442,7 +468,7 @@ async def wait_for_settlement(
             await session.commit()
             return "COMPLETED"
         if state.status == "FAILED":
-            break
+            return "RETRY"
     transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
     if transfer is None or transfer.status in TERMINAL:
         return transfer.status if transfer else "FAILED"

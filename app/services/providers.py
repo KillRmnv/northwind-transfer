@@ -35,20 +35,30 @@ def convert_amount(
     source_currency: str,
     target_currency: str,
     rates: dict[tuple[str, str], Decimal],
+    max_hops: int = 3,
 ) -> Decimal | None:
     if source_currency == target_currency:
         return amount
-    direct = rates.get((source_currency, target_currency))
-    if direct is not None:
-        return amount * direct
-    inverse = rates.get((target_currency, source_currency))
-    if inverse is not None and inverse != 0:
-        return amount / inverse
+    graph: dict[str, list[tuple[str, Decimal]]] = {}
     for (base, quote), rate in rates.items():
-        if base == source_currency and rate != 0:
-            onward = rates.get((quote, target_currency))
-            if onward is not None:
-                return amount * rate * onward
+        if rate == 0:
+            continue
+        graph.setdefault(base, []).append((quote, rate))
+        graph.setdefault(quote, []).append((base, Decimal("1") / rate))
+    frontier: list[tuple[str, Decimal, int]] = [(source_currency, Decimal("1"), 0)]
+    seen = {source_currency}
+    while frontier:
+        currency, factor, hops = frontier.pop(0)
+        if hops >= max_hops:
+            continue
+        for neighbour, rate in graph.get(currency, []):
+            next_factor = factor * rate
+            if neighbour == target_currency:
+                return amount * next_factor
+            if neighbour in seen:
+                continue
+            seen.add(neighbour)
+            frontier.append((neighbour, next_factor, hops + 1))
     return None
 
 

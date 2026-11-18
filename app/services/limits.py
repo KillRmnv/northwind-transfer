@@ -44,6 +44,7 @@ async def check_daily_limit(
     quote_target: str,
     minor_units: dict[str, int],
     now: datetime,
+    live_rates: dict[tuple[str, str], Decimal] | None = None,
 ) -> None:
     client = await session.get(Client, client_id)
     if client is None:
@@ -56,11 +57,15 @@ async def check_daily_limit(
         converted = await to_limit_currency(
             amount, currency, limit_currency, quote_rate, quote_source, quote_target
         )
+        if converted is None and live_rates:
+            converted = convert_via_rates(amount, currency, limit_currency, live_rates)
         if converted is not None:
             spent += converted
     addition = await to_limit_currency(
         source_amount, source_currency, limit_currency, quote_rate, quote_source, quote_target
     )
+    if addition is None and live_rates:
+        addition = convert_via_rates(source_amount, source_currency, limit_currency, live_rates)
     if addition is None:
         return
     limit = Decimal(client.daily_limit_amount)
@@ -127,7 +132,7 @@ async def check_limit_definitions(
             definition.currency,
         )
         if addition is None:
-            addition = convert_with_hints(
+            addition = convert_via_rates(
                 source_amount, source_currency, definition.currency, live_rates
             )
         if addition is None:
@@ -139,12 +144,10 @@ async def check_limit_definitions(
             )
 
 
-def convert_with_hints(
+def convert_via_rates(
     amount: Decimal,
     amount_currency: str,
     target_currency: str,
-    quote_rate: Decimal | None,
-    quote_source: str,
     live_rates: dict[tuple[str, str], Decimal],
 ) -> Decimal | None:
     if amount_currency == target_currency:

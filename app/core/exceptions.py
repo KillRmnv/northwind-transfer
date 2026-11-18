@@ -65,6 +65,16 @@ class IdempotencyConflictError(DomainError):
     status = 422
 
 
+class UnauthorizedError(DomainError):
+    code = "UNAUTHORIZED"
+    status = 401
+
+
+class ServiceUnavailableError(DomainError):
+    code = "SERVICE_UNAVAILABLE"
+    status = 503
+
+
 class ProviderUnavailableError(DomainError):
     code = "PROVIDER_UNAVAILABLE"
     status = 502

@@ -53,6 +53,7 @@ async def processing_transfer(api, freeze_rates, live_rates, monkeypatch) -> str
 
 async def test_duplicate_event_is_idempotent(api, freeze_rates, live_rates, monkeypatch) -> None:
     reference = await processing_transfer(api, freeze_rates, live_rates, monkeypatch)
+    monkeypatch.setattr(providers_module.ProviderClient, "get_payout", complete_getter())
     raw = event(reference, "COMPLETED", "ev-dup", "2026-11-05T12:00:00Z")
     first = await deliver(api, raw)
     second = await deliver(api, raw)
@@ -70,6 +71,7 @@ async def test_late_processing_does_not_override_terminal(
     api, freeze_rates, live_rates, monkeypatch
 ) -> None:
     reference = await processing_transfer(api, freeze_rates, live_rates, monkeypatch)
+    monkeypatch.setattr(providers_module.ProviderClient, "get_payout", complete_getter())
     completed = event(reference, "COMPLETED", "ev-c", "2026-11-05T12:00:00Z")
     await deliver(api, completed)
     late = event(reference, "PROCESSING", "ev-late", "2026-11-05T11:00:00Z")
@@ -133,3 +135,127 @@ async def test_no_double_reserve_under_concurrency(
         assert balance["balances"]["RUB"]["available"] == "10000.00"
     with check:
         assert balance["balances"]["RUB"]["reserved"] == "0.00"
+
+
+async def test_daily_limit_in_third_currency(api, freeze_rates, live_rates, monkeypatch) -> None:
+    patch_provider(
+        monkeypatch, create=accept_factory("po-lim"), get=complete_getter(), find=no_find
+    )
+    first_quote = await make_quote(api, freeze_rates, live_rates, amount="300000.00")
+    first = await post_transfer(api, first_quote["quote_id"], client_id="c_003", key="lim-1")
+    with check:
+        assert first.status_code in (201, 202)
+    second_quote = await make_quote(api, freeze_rates, live_rates, amount="300000.00")
+    second = await post_transfer(api, second_quote["quote_id"], client_id="c_003", key="lim-2")
+    with check:
+        assert second.status_code == 409
+    with check:
+        assert second.json()["error"]["code"] == "DAILY_LIMIT_EXCEEDED"
+
+
+async def test_repeat_key_after_quote_expiry_returns_same_transfer(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.v1 import transfers as transfers_route
+
+    quote = await make_quote(api, freeze_rates, live_rates)
+    patch_provider(
+        monkeypatch, create=accept_factory("po-exp"), get=complete_getter(), find=no_find
+    )
+    first = await post_transfer(api, quote["quote_id"], key="exp-key")
+    assert first.status_code in (201, 202)
+    future = datetime.now(timezone.utc) + timedelta(seconds=100000)
+    monkeypatch.setattr(transfers_route, "now_utc", lambda: future)
+    second = await post_transfer(api, quote["quote_id"], key="exp-key")
+    with check:
+        assert second.status_code in (201, 202)
+    with check:
+        assert second.json()["transfer_id"] == first.json()["transfer_id"]
+
+
+async def test_foreign_payout_id_does_not_complete(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    first_quote = await make_quote(api, freeze_rates, live_rates)
+    second_quote = await make_quote(api, freeze_rates, live_rates, amount="2000.00")
+
+    async def processing_get(self, provider_id, payout_id):
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="PROCESSING", failure_code=None
+        )
+
+    patch_provider(monkeypatch, create=accept_factory("po-a"), get=processing_get, find=no_find)
+    first = await post_transfer(api, first_quote["quote_id"], key="foreign-1")
+    second = await post_transfer(api, second_quote["quote_id"], key="foreign-2")
+    with check:
+        assert first.status_code == 202
+    with check:
+        assert second.status_code == 202
+
+    async def fake_get(self, provider_id, payout_id):
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="other-reference", status="COMPLETED", failure_code=None
+        )
+
+    patch_provider(monkeypatch, get=fake_get)
+    raw = event(
+        first.json()["transfer_id"].replace("-", ""),
+        "COMPLETED",
+        "ev-foreign",
+        "2026-11-05T12:00:00Z",
+    )
+    payload = json.loads(raw)
+    payload["payout_id"] = "po-foreign"
+    raw = json.dumps(payload).encode()
+    response = await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    with check:
+        assert response.status_code == 200
+    status = (await api.get(f"/transfers/{first.json()['transfer_id']}")).json()["status"]
+    with check:
+        assert status == "PROCESSING"
+
+
+async def test_empty_webhook_secret_fails_closed(api, monkeypatch) -> None:
+    monkeypatch.setattr(app_settings, "provider_webhook_secret", "")
+    raw = event("ffffffffffffffff", "COMPLETED", "ev-nosecret", "2026-11-05T12:00:00Z")
+    response = await api.post("/webhooks/prov_alpha", content=raw)
+    with check:
+        assert response.status_code == 503
+
+
+async def test_async_failed_falls_back_without_reconcile(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    quote = await make_quote(api, freeze_rates, live_rates)
+    calls = []
+
+    async def fake_create(self, provider_id, *args, **kwargs):
+        calls.append(provider_id)
+        return providers_module.Accepted(payout_id=f"po-{len(calls)}", status="PROCESSING")
+
+    async def fake_get(self, provider_id, payout_id):
+        if len(calls) == 1:
+            return providers_module.PayoutState(
+                payout_id=payout_id, reference="", status="FAILED", failure_code="ACCOUNT_CLOSED"
+            )
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="COMPLETED", failure_code=None
+        )
+
+    patch_provider(monkeypatch, create=fake_create, get=fake_get, find=no_find)
+    response = await post_transfer(api, quote["quote_id"], key="async-failed")
+    with check:
+        assert response.status_code == 201
+    body = response.json()
+    with check:
+        assert body["status"] == "COMPLETED"
+    with check:
+        assert len(body["attempts"]) == 2
+    with check:
+        assert body["attempts"][0]["status"] == "FAILED"
