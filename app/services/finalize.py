@@ -9,7 +9,17 @@ from app.models.tables import Transfer
 from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 
-TERMINAL_STATUSES = ("COMPLETED", "FAILED", "CANCELLED")
+
+async def _settle(session: AsyncSession, transfer_id, status: str, now: datetime) -> bool:
+    result = await session.execute(
+        sa.update(Transfer)
+        .where(
+            Transfer.transfer_id == transfer_id,
+            Transfer.funds_settled.is_(False),
+        )
+        .values(funds_settled=True, status=status, updated_at=now)
+    )
+    return result.rowcount == 1
 
 
 async def _sync_attempt(session: AsyncSession, transfer, status: str, now: datetime) -> None:
@@ -23,33 +33,11 @@ async def _sync_attempt(session: AsyncSession, transfer, status: str, now: datet
         )
 
 
-async def _claim(session: AsyncSession, transfer_id, target: str, now: datetime) -> bool:
-    result = await session.execute(
-        sa.update(Transfer)
-        .where(
-            Transfer.transfer_id == transfer_id,
-            Transfer.status.not_in(TERMINAL_STATUSES),
-        )
-        .values(status=target, updated_at=now)
-    )
-    return result.rowcount == 1
-
-
-async def _claim_funds(session: AsyncSession, transfer_id) -> bool:
-    result = await session.execute(
-        sa.update(Transfer)
-        .where(Transfer.transfer_id == transfer_id, Transfer.funds_settled.is_(False))
-        .values(funds_settled=True)
-    )
-    return result.rowcount == 1
-
-
 async def complete_transfer(
     session: AsyncSession, settings: Settings, transfer, now: datetime
 ) -> bool:
-    if not await _claim_funds(session, transfer.transfer_id):
+    if not await _settle(session, transfer.transfer_id, "COMPLETED", now):
         return False
-    await _claim(session, transfer.transfer_id, "COMPLETED", now)
     await balance_repo.consume_reserve(
         session, transfer.client_id, transfer.source_currency, Decimal(transfer.source_amount)
     )
@@ -59,7 +47,7 @@ async def complete_transfer(
 
 
 async def fail_transfer(session: AsyncSession, settings: Settings, transfer, now: datetime) -> bool:
-    if not await _claim(session, transfer.transfer_id, "FAILED", now):
+    if not await _settle(session, transfer.transfer_id, "FAILED", now):
         return False
     await balance_repo.release_reserve(
         session, transfer.client_id, transfer.source_currency, Decimal(transfer.source_amount)
