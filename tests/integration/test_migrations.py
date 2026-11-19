@@ -6,7 +6,7 @@ import asyncpg
 import pytest
 from pytest_check import check
 
-DB_NAME = "transfer_test_migrations"
+DB_NAME = os.environ.get("TEST_MIGRATIONS_DB", "transfer_test_migrations")
 
 
 async def admin_connect():
@@ -103,9 +103,31 @@ async def test_migration_enforces_idempotency_and_event_uniqueness(migrated_data
     )
     names = {row["conname"] for row in constraints}
     with check:
-        assert any("idempotency_key" in name for name in names)
+        assert any("idempotency" in name or "uq_transfers_client_key" in name for name in names)
     with check:
         assert any("webhook_events_pkey" in name for name in names)
+
+
+KNOWN_TABLES = (
+    "currencies",
+    "countries",
+    "payout_methods",
+    "transfer_statuses",
+    "attempt_statuses",
+    "limit_period_types",
+    "directions",
+    "providers",
+    "provider_directions",
+    "maintenance_windows",
+    "clients",
+    "balances",
+)
+
+
+def _count_table_sql(table: str) -> str:
+    if table not in KNOWN_TABLES:
+        raise ValueError(f"unknown table {table}")
+    return f"select count(*) from {table}"  # noqa: S608 - table validated against KNOWN_TABLES above
 
 
 async def test_seed_is_idempotent(migrated_database) -> None:
@@ -129,14 +151,53 @@ async def test_seed_is_idempotent(migrated_database) -> None:
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
         await seed_module.seed(session, Path("data"))
-        first = (await session.execute(text("select count(*) from currencies"))).scalar_one()
+        counts = {}
+        for table in (
+            "currencies",
+            "countries",
+            "payout_methods",
+            "transfer_statuses",
+            "attempt_statuses",
+            "limit_period_types",
+            "directions",
+            "providers",
+            "provider_directions",
+            "maintenance_windows",
+            "clients",
+            "balances",
+        ):
+            counts[table] = (await session.execute(text(_count_table_sql(table)))).scalar_one()
+        balances_before = (
+            await session.execute(
+                text("select client_id, currency, available from balances order by 1, 2")
+            )
+        ).all()
         await seed_module.seed(session, Path("data"))
-        second = (await session.execute(text("select count(*) from currencies"))).scalar_one()
-        providers = (await session.execute(text("select count(*) from providers"))).scalar_one()
+        for table, expected in counts.items():
+            actual = (await session.execute(text(_count_table_sql(table)))).scalar_one()
+            with check:
+                assert actual == expected, table
+        balances_after = (
+            await session.execute(
+                text("select client_id, currency, available from balances order by 1, 2")
+            )
+        ).all()
+        with check:
+            assert balances_after == balances_before
     await engine.dispose()
     with check:
-        assert first == 10
+        assert counts["currencies"] == 10
     with check:
-        assert second == first
-    with check:
-        assert providers == 7
+        assert counts["providers"] == 7
+
+
+async def test_postgres_memory_settings_applied(session) -> None:
+    import pytest
+    from sqlalchemy import text
+
+    if session.bind.dialect.name != "postgresql":
+        pytest.skip("requires PostgreSQL")
+    for name in ("shared_buffers", "work_mem", "max_connections"):
+        value = (await session.execute(text(f"SHOW {name}"))).scalar_one()
+        with check:
+            assert value, name

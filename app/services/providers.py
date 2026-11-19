@@ -14,9 +14,9 @@ from app.core.types import (
     UnknownResult,
 )
 
-W_MARGIN = 100.0
-W_SUCCESS = 50.0
-W_LATENCY_MS = 1000.0
+W_MARGIN = Decimal("100")
+W_SUCCESS = Decimal("50")
+W_LATENCY_MS = Decimal("1000")
 
 
 def filter_direction(providers: list[ProviderInfo], direction_id: str) -> list[ProviderInfo]:
@@ -122,9 +122,9 @@ def score_providers(
         if margin < min_margin_percent / Decimal("100"):
             continue
         score = (
-            Decimal(str(W_MARGIN)) * margin
-            + Decimal(str(W_SUCCESS)) * provider.success_rate
-            - Decimal(provider.p95_latency_ms) / Decimal(str(W_LATENCY_MS))
+            W_MARGIN * margin
+            + W_SUCCESS * provider.success_rate
+            - Decimal(provider.p95_latency_ms) / W_LATENCY_MS
         )
         scored.append(
             ScoredProvider(provider=provider, score=score, provider_fee_source=fee_source)
@@ -150,11 +150,8 @@ class ProviderClient:
         recipient: dict,
         callback_url: str,
         idempotency_key: str,
-        scenario: str | None = None,
     ) -> CreateOutcome:
         headers = {"Idempotency-Key": idempotency_key}
-        if scenario is not None:
-            headers["X-Scenario"] = scenario
         body = {
             "reference": reference,
             "amount": amount,
@@ -172,10 +169,13 @@ class ProviderClient:
             )
         if status_code is None:
             return UnknownResult(reason="transport error")
-        if status_code == 201 and isinstance(payload, dict):
+        if status_code == 201 and isinstance(payload, dict) and payload.get("payout_id"):
             return Accepted(
-                payout_id=payload["payout_id"], status=payload.get("status", "PROCESSING")
+                payout_id=str(payload["payout_id"]),
+                status=str(payload.get("status", "PROCESSING")),
             )
+        if status_code == 201:
+            return UnknownResult(reason="http 201 without payout_id")
         if status_code == 422 and isinstance(payload, dict):
             return Declined(failure_code=str(payload.get("code", "DECLINED")))
         if status_code == 503:
@@ -220,10 +220,16 @@ class ProviderClient:
         return "found", _parse_state(payload)
 
 
+ALLOWED_PAYOUT_STATUSES = frozenset({"PROCESSING", "COMPLETED", "FAILED"})
+
+
 def _parse_state(payload: dict) -> PayoutState:
+    status = str(payload.get("status", "PROCESSING"))
+    if status not in ALLOWED_PAYOUT_STATUSES:
+        status = "PROCESSING"
     return PayoutState(
         payout_id=str(payload.get("payout_id", "")),
         reference=str(payload.get("reference", "")),
-        status=str(payload.get("status", "PROCESSING")),
+        status=status,
         failure_code=payload.get("failure_code"),
     )

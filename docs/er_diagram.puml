@@ -81,8 +81,9 @@ entity "Балансы" as balances {
   * клиент_id : VARCHAR(32) <<FK>>
   * валюта : VARCHAR(3) <<FK>>
   --
-  * доступно : NUMERIC(20,8)
-  * в_резерве : NUMERIC(20,8)
+  * доступно : NUMERIC(20,8) <<CHECK >= 0>>
+  * в_резерве : NUMERIC(20,8) <<CHECK >= 0>>
+  * списано : NUMERIC(20,8) <<CHECK >= 0>>
 }
 
 entity "Котировки" as quotes {
@@ -97,6 +98,7 @@ entity "Котировки" as quotes {
   * курс : NUMERIC(20,8)
   * сумма_получения : NUMERIC(20,8)
   * валюта_получения : VARCHAR(3) <<FK>>
+  * расшифровка : JSON <<NULL>>
   * истекает : TIMESTAMPTZ
   * создана : TIMESTAMPTZ
 }
@@ -118,10 +120,21 @@ entity "Переводы" as transfers {
   * получатель_имя : VARCHAR(255)
   * получатель_счёт : VARCHAR(64)
   * получатель_банк : VARCHAR(32)
-  * ключ_идемпотентности : VARCHAR(128) <<UQ>>
+  * ключ_идемпотентности : VARCHAR(128) <<UQ(client_id)>>
   * хеш_идемпотентности : VARCHAR(64)
+  * средства_списаны : BOOLEAN
   * создан : TIMESTAMPTZ
   * обновлён : TIMESTAMPTZ
+}
+
+entity "История статусов" as transfer_status_history {
+  * id : BIGSERIAL <<PK>>
+  --
+  * перевод_id : UUID <<FK>>
+  * из_статуса : VARCHAR(24) <<NULL>>
+  * в_статус : VARCHAR(24)
+  * актор : VARCHAR(64)
+  * когда : TIMESTAMPTZ
 }
 
 entity "Статусы попыток" as attempt_statuses {
@@ -192,6 +205,7 @@ clients ||--o{ transfers : "создаёт"
 quotes ||--o{ transfers : "рассчитан по"
 transfer_statuses ||--o{ transfers : "состояние"
 transfers ||--o{ payout_attempts : "исполняется через"
+transfers ||--o{ transfer_status_history : "история переходов"
 providers ||--o{ payout_attempts : "выполняет"
 attempt_statuses ||--o{ payout_attempts : "состояние"
 attempt_statuses ||--o{ webhook_events : "состояние события"

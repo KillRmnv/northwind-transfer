@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from app.core.exceptions import ValidationError
 from app.core.money import format_money
 from app.core.types import QuoteResult
 from app.models.tables import Quote, Transfer
@@ -8,8 +9,14 @@ from app.schemas.quotes import Money, QuoteResponse
 from app.schemas.transfers import Attempt, HistoryEntry, TransferResponse
 
 
+def units_for(minor_units: dict[str, int], currency: str) -> int:
+    if currency not in minor_units:
+        raise ValidationError(f"unknown currency {currency}")
+    return minor_units[currency]
+
+
 def money(amount: Decimal, currency: str, minor_units: dict[str, int]) -> Money:
-    return Money(amount=format_money(amount, minor_units[currency]), currency=currency)
+    return Money(amount=format_money(amount, units_for(minor_units, currency)), currency=currency)
 
 
 def quote_to_response(
@@ -41,7 +48,7 @@ def quote_row_to_response(quote: Quote, minor_units: dict[str, int]) -> QuoteRes
         amount_to_convert=money(quote.amount_to_convert, quote.source_currency, minor_units),
         rate=f"{Decimal(quote.rate):.4f}",
         target_amount=money(quote.target_amount, quote.target_currency, minor_units),
-        breakdown=[],
+        breakdown=list(quote.breakdown or []),
         expires_at=quote.expires_at,
     )
 
@@ -92,8 +99,9 @@ def balances_to_response(
         balances={
             currency: CurrencyBalance(
                 currency=currency,
-                available=format_money(row.available, minor_units[currency]),
-                reserved=format_money(row.reserved, minor_units[currency]),
+                available=format_money(row.available, units_for(minor_units, currency)),
+                reserved=format_money(row.reserved, units_for(minor_units, currency)),
+                spent=format_money(row.spent, units_for(minor_units, currency)),
             )
             for currency, row in rows.items()
         },

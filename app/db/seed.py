@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.settings import settings
@@ -25,7 +26,7 @@ from app.models.tables import (
     TransferStatus,
 )
 
-TRANSFER_STATUSES = ["PENDING", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"]
+TRANSFER_STATUSES = ["PENDING", "PROCESSING", "NEEDS_REVIEW", "COMPLETED", "FAILED"]
 ATTEMPT_STATUSES = ["PROCESSING", "COMPLETED", "FAILED"]
 LIMIT_PERIOD_TYPES = ["MINUTES", "HOURLY", "DAILY", "WINDOW_N"]
 
@@ -115,16 +116,18 @@ async def seed_provider_windows(session: AsyncSession, provider_id: str, windows
         .scalars()
         .all()
     )
+    wanted = {(parse_time(window["from"]), parse_time(window["to"])) for window in windows}
     for row in existing:
-        await session.delete(row)
-    for window in windows:
-        session.add(
-            MaintenanceWindow(
-                provider_id=provider_id,
-                from_at=parse_time(window["from"]),
-                to_at=parse_time(window["to"]),
-            )
-        )
+        if (row.from_at, row.to_at) not in wanted:
+            await session.delete(row)
+    known = {(row.from_at, row.to_at) for row in existing}
+    for start, end in sorted(wanted - known):
+        try:
+            async with session.begin_nested():
+                session.add(MaintenanceWindow(provider_id=provider_id, from_at=start, to_at=end))
+                await session.flush()
+        except IntegrityError:
+            continue
 
 
 async def seed_providers(session: AsyncSession, data_dir: Path) -> None:
@@ -166,6 +169,13 @@ async def seed_clients(session: AsyncSession, data_dir: Path) -> None:
 
 
 async def seed(session: AsyncSession, data_dir: Path) -> None:
+    """Idempotent seed: merge by PK, sync windows by natural key, never touch balances/reserves.
+
+    Safe to run on every startup and concurrently: rows are merged by primary
+    key, maintenance windows are reconciled against (provider_id, from_at, to_at)
+    with a unique constraint as backstop, and existing balances are preserved.
+    Stale reference rows are intentionally not deleted.
+    """
     await seed_currencies(session, data_dir)
     await seed_reference_data(session, data_dir)
     await seed_directions(session, data_dir)

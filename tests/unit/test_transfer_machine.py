@@ -12,7 +12,7 @@ def machine_with(status: str) -> TransferStateMachine:
 
 def test_edges_cover_every_known_status() -> None:
     with check:
-        assert set(EDGES) == {"PENDING", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"}
+        assert set(EDGES) == {"PENDING", "PROCESSING", "NEEDS_REVIEW", "COMPLETED", "FAILED"}
 
 
 def test_terminal_states_have_no_outgoing_edges() -> None:
@@ -34,9 +34,15 @@ def test_every_edge_target_is_known() -> None:
         ("PENDING", "PROCESSING", True),
         ("PENDING", "COMPLETED", True),
         ("PENDING", "FAILED", True),
+        ("PENDING", "NEEDS_REVIEW", True),
         ("PROCESSING", "COMPLETED", True),
         ("PROCESSING", "FAILED", True),
+        ("PROCESSING", "NEEDS_REVIEW", True),
+        ("NEEDS_REVIEW", "PROCESSING", True),
+        ("NEEDS_REVIEW", "COMPLETED", True),
+        ("NEEDS_REVIEW", "FAILED", True),
         ("PROCESSING", "PENDING", False),
+        ("NEEDS_REVIEW", "PENDING", False),
         ("COMPLETED", "FAILED", False),
         ("FAILED", "PROCESSING", False),
         ("COMPLETED", "COMPLETED", False),

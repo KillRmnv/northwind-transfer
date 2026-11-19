@@ -1,19 +1,20 @@
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import as_utc, now_utc
 from app.core.exceptions import (
+    ClientNotFoundError,
     IdempotencyConflictError,
     InsufficientFundsError,
     QuoteExpiredError,
     QuoteNotFoundError,
     TransferNotFoundError,
-    ValidationError,
 )
+from app.core.locks import transfer_lock
 from app.core.money import format_money
 from app.core.settings import Settings
 from app.core.types import PayoutState, UnknownResult
@@ -32,9 +33,11 @@ from app.services.providers import (
     filter_limits,
     score_providers,
 )
-from app.services.quotes import RateData
+from app.services.quotes import RateData, filter_fresh_rates, find_tariff
 from app.services.rates import RatesClient
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
+
+UNRESOLVED_RETRY_AFTER_SEC = 60
 
 
 async def resolve_unknown(
@@ -43,10 +46,10 @@ async def resolve_unknown(
     reference: str,
     *,
     attempts: int = 5,
-    delay: float = 2.0,
+    delay: timedelta = timedelta(seconds=2),
 ) -> tuple[str, "PayoutState | None"]:
     for _ in range(attempts):
-        await asyncio.sleep(delay)
+        await asyncio.sleep(delay.total_seconds())
         outcome, state = await client.probe_payout(provider_id, reference)
         if outcome == "found":
             return "found", state
@@ -93,7 +96,7 @@ async def create_with_recovery(
         return outcome
     for _ in range(3):
         outcome, found = await resolve_unknown(
-            client, provider_id, reference, attempts=1, delay=1.0
+            client, provider_id, reference, attempts=1, delay=timedelta(seconds=1)
         )
         if found is not None:
             return found
@@ -110,7 +113,9 @@ async def create_with_recovery(
         )
         if isinstance(retry, (AcceptedOutcome, DeclinedOutcome)):
             return retry
-    outcome, found = await resolve_unknown(client, provider_id, reference, attempts=4, delay=2.0)
+    outcome, found = await resolve_unknown(
+        client, provider_id, reference, attempts=4, delay=timedelta(seconds=2)
+    )
     if found is not None:
         return found
     if outcome == "error":
@@ -122,8 +127,10 @@ async def live_rates_map(settings: Settings) -> dict[tuple[str, str], RateData]:
     return await RatesClient(settings.mock_provider_url, settings.mock_provider_timeout_sec).fetch()
 
 
-def simple_rates(rates: dict[tuple[str, str], RateData]) -> dict[tuple[str, str], Decimal]:
-    return {pair: data.rate for pair, data in rates.items()}
+def simple_rates(
+    rates: dict[tuple[str, str], RateData], now: datetime
+) -> dict[tuple[str, str], Decimal]:
+    return filter_fresh_rates(rates, now)
 
 
 async def select_providers(
@@ -173,24 +180,28 @@ async def create_transfer(
         "recipient": recipient,
     }
     digest = transfer_repo.body_hash(body)
-    existing = await transfer_repo.get_by_idempotency_key(session, idempotency_key)
+    existing = await transfer_repo.get_by_idempotency_key(session, idempotency_key, client_id)
     if existing is not None:
         if existing.idempotency_hash != digest:
             raise IdempotencyConflictError(idempotency_key)
         return existing, False
-    client = await transfer_repo.lock_client(session, client_id)
-    if client is None:
-        raise ValidationError(f"unknown client {client_id}")
     quote = await get_quote(session, quote_id)
     if quote is None:
         raise QuoteNotFoundError(str(quote_id))
     if as_utc(quote.expires_at) <= as_utc(now):
         raise QuoteExpiredError(str(quote_id))
-
     rates = await live_rates_map(settings)
-    simple = simple_rates(rates)
+    simple = simple_rates(rates, now)
+    client = await transfer_repo.lock_client(session, client_id)
+    if client is None:
+        raise ClientNotFoundError(f"unknown client {client_id}")
+    existing = await transfer_repo.get_by_idempotency_key(session, idempotency_key, client_id)
+    if existing is not None:
+        if existing.idempotency_hash != digest:
+            raise IdempotencyConflictError(idempotency_key)
+        return existing, False
     tariffs = await load_tariffs(session)
-    tariff = next(t for t in tariffs if t.direction_id == quote.direction_id)
+    tariff = find_tariff(tariffs, quote.direction_id)
 
     source_amount = Decimal(quote.source_amount)
     source_currency = quote.source_currency
@@ -228,10 +239,25 @@ async def create_transfer(
     transfer, created = await transfer_repo.create_transfer_or_existing(
         session, quote, client_id, recipient, idempotency_key, digest, now
     )
+    if created:
+        await transfer_repo.record_transition(
+            session, transfer.transfer_id, None, "PENDING", "client", now
+        )
     if not created:
         await balance_repo.release_reserve(session, client_id, source_currency, source_amount)
     await session.commit()
     return transfer, created
+
+
+async def run_attempts_locked(
+    session: AsyncSession,
+    settings: Settings,
+    transfer_id: uuid.UUID,
+    now: datetime,
+    actor: str = "service",
+) -> str:
+    async with transfer_lock(f"tx:{transfer_id}"):
+        return await run_attempts(session, settings, transfer_id, now, actor)
 
 
 async def run_attempts(
@@ -239,20 +265,49 @@ async def run_attempts(
     settings: Settings,
     transfer_id: uuid.UUID,
     now: datetime,
+    actor: str = "service",
 ) -> str:
     minor_units = await load_minor_units(session)
+    rates = await live_rates_map(settings)
+    simple = simple_rates(rates, now)
     transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
     if transfer is None:
         raise TransferNotFoundError(str(transfer_id))
     if transfer.status in TERMINAL:
         return transfer.status
     quote = await get_quote(session, transfer.quote_id)
+    if quote is None:
+        raise QuoteNotFoundError(str(transfer.quote_id))
+    if as_utc(quote.expires_at) <= as_utc(now):
+        attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+        live = [a for a in attempts if a.payout_id]
+        if live:
+            return transfer.status
+        await TransferStateMachine(session, transfer).fail(now, actor)
+        await session.commit()
+        return "FAILED"
     client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    reference = reference_for(transfer.transfer_id)
+    for pending in [a for a in attempts if a.status == "PROCESSING" and not a.payout_id]:
+        outcome, state = await client.probe_payout(pending.provider_id, reference)
+        probed_at = now_utc()
+        if outcome == "found" and state is not None:
+            await transfer_repo.update_attempt(
+                session, pending, state.status, state.failure_code, state.payout_id, probed_at
+            )
+            await session.commit()
+        elif (
+            outcome == "missing"
+            and (probed_at - as_utc(pending.created_at)).total_seconds()
+            >= UNRESOLVED_RETRY_AFTER_SEC
+        ):
+            await transfer_repo.update_attempt(
+                session, pending, "FAILED", "PROVIDER_UNREACHABLE", None, probed_at
+            )
+            await session.commit()
+    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
-    unresolved = [a for a in attempts if a.status == "PROCESSING" and not a.payout_id]
-    if unresolved and not live:
-        return "PROCESSING"
     if live:
         last = live[-1]
         return await wait_for_settlement(
@@ -266,9 +321,7 @@ async def run_attempts(
             now,
         )
     tariffs = await load_tariffs(session)
-    tariff = next(t for t in tariffs if t.direction_id == quote.direction_id)
-    rates = await live_rates_map(settings)
-    simple = simple_rates(rates)
+    tariff = find_tariff(tariffs, quote.direction_id)
     client_fee_source = Decimal(quote.fee_amount)
     if quote.fee_currency != quote.source_currency and quote.rate and Decimal(quote.rate) != 0:
         if quote.fee_currency == quote.target_currency:
@@ -289,11 +342,10 @@ async def run_attempts(
         now,
     )
     if not scored:
-        await TransferStateMachine(session, transfer).fail(now)
+        await TransferStateMachine(session, transfer).fail(now, actor)
         await session.commit()
         return "FAILED"
     start_no = len(attempts) + 1
-    reference = reference_for(transfer.transfer_id)
     callback_url = f"{settings.public_base_url}/webhooks/{{provider_id}}"
     target_str = format_money(Decimal(quote.target_amount), minor_units[quote.target_currency])
     recipient = {
@@ -304,6 +356,9 @@ async def run_attempts(
     tried = {a.provider_id for a in attempts}
     remaining = [item for item in scored if item.provider.provider_id not in tried]
     for offset, scored_item in enumerate(remaining):
+        await session.refresh(transfer)
+        if transfer.status in TERMINAL:
+            return transfer.status
         attempt_no = start_no + offset
         provider = scored_item.provider
         pending_attempt = await transfer_repo.record_attempt(
@@ -334,7 +389,7 @@ async def run_attempts(
             await transfer_repo.update_attempt(
                 session, pending_attempt, "PROCESSING", None, outcome.payout_id, now
             )
-            await TransferStateMachine(session, transfer).start(now)
+            await TransferStateMachine(session, transfer).start(now, actor)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -345,6 +400,7 @@ async def run_attempts(
                 outcome.payout_id,
                 reference,
                 now,
+                actor=actor,
             )
             if settlement == "RETRY":
                 continue
@@ -359,9 +415,9 @@ async def run_attempts(
             await transfer_repo.update_attempt(
                 session, pending_attempt, "PROCESSING", "NEEDS_REVIEW", None, now
             )
-            await TransferStateMachine(session, transfer).start(now)
+            await TransferStateMachine(session, transfer).needs_review(now, actor)
             await session.commit()
-            return "PROCESSING"
+            return "NEEDS_REVIEW"
         found = outcome if isinstance(outcome, PayoutState) else None
         if found is not None and found.status == "FAILED":
             await transfer_repo.update_attempt(
@@ -378,7 +434,7 @@ async def run_attempts(
                 found.payout_id,
                 now,
             )
-            await TransferStateMachine(session, transfer).start(now)
+            await TransferStateMachine(session, transfer).start(now, actor)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -389,6 +445,7 @@ async def run_attempts(
                 found.payout_id,
                 reference,
                 now,
+                actor=actor,
             )
             if settlement == "RETRY":
                 continue
@@ -396,13 +453,15 @@ async def run_attempts(
         await transfer_repo.update_attempt(
             session,
             pending_attempt,
-            "FAILED",
-            "PROVIDER_UNREACHABLE",
+            "PROCESSING",
+            "NEEDS_REVIEW",
             None,
             now,
         )
+        await TransferStateMachine(session, transfer).needs_review(now, actor)
         await session.commit()
-    await TransferStateMachine(session, transfer).fail(now)
+        return "NEEDS_REVIEW"
+    await TransferStateMachine(session, transfer).fail(now, actor)
     await session.commit()
     return transfer.status
 
@@ -416,13 +475,18 @@ async def wait_for_settlement(
     payout_id: str,
     reference: str,
     started: datetime,
-    poll_interval: float = 0.5,
+    poll_interval: timedelta = timedelta(milliseconds=500),
+    actor: str = "service",
 ) -> str:
-    deadline = started.timestamp() + settings.api_sync_timeout_sec
+    deadline: datetime | None = None
     now = started
-    while now.timestamp() < deadline:
-        await asyncio.sleep(poll_interval)
+    while True:
+        await asyncio.sleep(poll_interval.total_seconds())
         now = now_utc()
+        if deadline is None:
+            deadline = now + timedelta(seconds=settings.api_sync_timeout_sec)
+        if now >= deadline:
+            break
         state = await client.get_payout(provider_id, payout_id)
         if state is None:
             state = await client.find_payout(provider_id, reference)
@@ -440,14 +504,16 @@ async def wait_for_settlement(
         transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
         if transfer is None:
             return "FAILED"
-        action = await TransferStateMachine(session, transfer).settle_from_payout(state.status, now)
+        action = await TransferStateMachine(session, transfer).settle_from_payout(
+            state.status, now, actor
+        )
         await session.commit()
         if action != "PROCESSING":
             return action
     transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
     if transfer is None or transfer.status in TERMINAL:
         return transfer.status if transfer else "FAILED"
-    started_processing = await TransferStateMachine(session, transfer).start(now_utc())
+    started_processing = await TransferStateMachine(session, transfer).start(now_utc(), actor)
     await session.commit()
     if started_processing:
         return "PROCESSING"

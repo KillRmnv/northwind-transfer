@@ -1,5 +1,5 @@
 from datetime import datetime
-from decimal import ROUND_CEILING, Decimal
+from decimal import Decimal
 
 from app.core.exceptions import (
     AmountAboveMaxError,
@@ -7,7 +7,7 @@ from app.core.exceptions import (
     RateUnavailableError,
     UnsupportedDirectionError,
 )
-from app.core.money import format_money, round_money
+from app.core.money import ceil_to_minor, format_money, quantize_rate, quantum, round_money
 from app.core.types import QuoteResult, RateData, TariffData
 
 __all__ = [
@@ -18,6 +18,17 @@ __all__ = [
 
 RATE_DISPLAY_PLACES = 4
 RATE_STALE_AFTER_HOURS = 6
+
+
+def filter_fresh_rates(
+    rates: dict[tuple[str, str], RateData], now: datetime
+) -> dict[tuple[str, str], Decimal]:
+    limit_sec = RATE_STALE_AFTER_HOURS * 3600
+    return {
+        pair: data.rate
+        for pair, data in rates.items()
+        if _valid_rate(data.rate) and _fresh(data, now, limit_sec)
+    }
 
 
 def find_direction(
@@ -43,6 +54,13 @@ def find_direction(
     )
 
 
+def find_tariff(tariffs: list[TariffData], direction_id: str) -> TariffData:
+    for tariff in tariffs:
+        if tariff.direction_id == direction_id:
+            return tariff
+    raise UnsupportedDirectionError(f"unknown direction {direction_id}")
+
+
 def resolve_rate(
     rates: dict[tuple[str, str], RateData],
     source_currency: str,
@@ -59,14 +77,14 @@ def resolve_rate(
         if not _valid_rate(direct.rate):
             raise RateUnavailableError(f"invalid rate {source_currency} -> {target_currency}")
         if _fresh(direct, now, limit_sec):
-            return direct.rate
+            return quantize_rate(direct.rate)
         raise RateUnavailableError(f"rate {source_currency} -> {target_currency} is stale")
     inverse = rates.get((target_currency, source_currency))
     if inverse is not None:
         if not _valid_rate(inverse.rate):
             raise RateUnavailableError(f"invalid rate {target_currency} -> {source_currency}")
         if _fresh(inverse, now, limit_sec):
-            return Decimal("1") / inverse.rate
+            return quantize_rate(Decimal("1") / inverse.rate)
     best: tuple[Decimal, datetime] | None = None
     for (base, quote), first in rates.items():
         if base != source_currency or not _valid_rate(first.rate):
@@ -81,14 +99,14 @@ def resolve_rate(
             best = (first.rate * second.rate, freshness)
     if best is None:
         raise RateUnavailableError(f"no rate {source_currency} -> {target_currency}")
-    return best[0]
+    return quantize_rate(best[0])
 
 
 def _valid_rate(rate: Decimal) -> bool:
     return rate.is_finite() and rate > 0
 
 
-def _fresh(data: RateData, now: datetime, limit_sec: float) -> bool:
+def _fresh(data: RateData, now: datetime, limit_sec: int) -> bool:
     age_sec = (now - data.updated_at).total_seconds()
     return -60 <= age_sec <= limit_sec
 
@@ -173,25 +191,24 @@ def calculate_target(
     ]
     if not _valid_rate(rate):
         raise RateUnavailableError(f"invalid rate {src} -> {tgt}")
-    quantum_src = Decimal("1") if minor_units[src] == 0 else Decimal("1." + "0" * minor_units[src])
     if charged_in_source:
         to_convert_exact = amount / rate
-        percent_candidate = (
+        percent_candidate = ceil_to_minor(
             (to_convert_exact + tariff.fee_fixed)
-            / (Decimal("1") - tariff.fee_percent / Decimal("100"))
-        ).quantize(quantum_src, rounding=ROUND_CEILING)
+            / (Decimal("1") - tariff.fee_percent / Decimal("100")),
+            minor_units[src],
+        )
         raw_fee = percent_candidate * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
         source = percent_candidate
         if raw_fee < tariff.fee_min:
-            source = (to_convert_exact + tariff.fee_min).quantize(
-                quantum_src, rounding=ROUND_CEILING
-            )
+            source = ceil_to_minor(to_convert_exact + tariff.fee_min, minor_units[src])
         forward = calculate_source(source, tariff, rate, minor_units)
         for _ in range(10):
             if forward.target_amount >= amount:
                 break
-            source = (Decimal(forward.source_amount) + quantum_src).quantize(
-                quantum_src, rounding=ROUND_CEILING
+            source = ceil_to_minor(
+                Decimal(forward.source_amount) + quantum(minor_units[src]),
+                minor_units[src],
             )
             forward = calculate_source(source, tariff, rate, minor_units)
         return QuoteResult(
@@ -209,17 +226,18 @@ def calculate_target(
     percent_gross = (amount + tariff.fee_fixed) / (
         Decimal("1") - tariff.fee_percent / Decimal("100")
     )
-    percent_source = (percent_gross / rate).quantize(quantum_src, rounding=ROUND_CEILING)
+    percent_source = ceil_to_minor(percent_gross / rate, minor_units[src])
     raw_gross_fee = percent_gross * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
     source = percent_source
     if raw_gross_fee < tariff.fee_min:
-        source = ((amount + tariff.fee_min) / rate).quantize(quantum_src, rounding=ROUND_CEILING)
+        source = ceil_to_minor((amount + tariff.fee_min) / rate, minor_units[src])
     forward = calculate_source(source, tariff, rate, minor_units)
     for _ in range(10):
         if forward.target_amount >= amount:
             break
-        source = (Decimal(forward.source_amount) + quantum_src).quantize(
-            quantum_src, rounding=ROUND_CEILING
+        source = ceil_to_minor(
+            Decimal(forward.source_amount) + quantum(minor_units[src]),
+            minor_units[src],
         )
         forward = calculate_source(source, tariff, rate, minor_units)
     return QuoteResult(
@@ -260,20 +278,22 @@ def amount_in_limit_currency(
     amount_currency: str,
     tariff: TariffData,
     rate: Decimal,
-) -> Decimal:
+) -> Decimal | None:
     if amount_currency == tariff.limit_currency:
         return amount
+    if not _valid_rate(rate):
+        return None
     if (
         tariff.limit_currency == tariff.source_currency
         and amount_currency == tariff.target_currency
     ):
-        return amount / rate if rate != 0 else amount
+        return amount / rate
     if (
         tariff.limit_currency == tariff.target_currency
         and amount_currency == tariff.source_currency
     ):
         return amount * rate
-    return amount
+    return None
 
 
 def format_rate(rate: Decimal) -> str:

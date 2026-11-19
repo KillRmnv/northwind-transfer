@@ -187,7 +187,7 @@ async def test_weight_scales_usage(api, session, freeze_rates, live_rates, monke
         assert response.status_code == 409
 
 
-async def test_category_scope_is_ignored_without_category_field(
+async def test_unconvertible_limit_currency_fails_closed(
     api, session, freeze_rates, live_rates, monkeypatch
 ) -> None:
     from tests.integration.test_transfers_api import (
@@ -198,18 +198,13 @@ async def test_category_scope_is_ignored_without_category_field(
         post_transfer,
     )
 
-    await seed_limit(
-        session,
-        "c_001",
-        scope="category",
-        category="groceries",
-        amount=Decimal("1"),
-        currency="RUB",
-    )
+    await seed_limit(session, "c_001", amount=Decimal("100000"), currency="KZT")
     patch_provider(
-        monkeypatch, create=accept_factory("po-cat"), get=complete_getter(), find=no_find
+        monkeypatch, create=accept_factory("po-kzt"), get=complete_getter(), find=no_find
     )
-    quote = await make_quote(api, freeze_rates, live_rates, amount="4000.00")
-    response = await post_transfer(api, quote["quote_id"], key="category")
+    quote = await make_quote(api, freeze_rates, live_rates)
+    response = await post_transfer(api, quote["quote_id"], key="key-kzt")
     with check:
-        assert response.status_code in (201, 202)
+        assert response.status_code == 422
+    with check:
+        assert response.json()["error"]["code"] == "RATE_UNAVAILABLE"

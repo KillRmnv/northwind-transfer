@@ -9,3 +9,5 @@ docs/er_diagram.png
 docs/er_diagram.svg
 .env
 *.log
+var/
+*.zip

@@ -105,9 +105,23 @@ docker compose run --rm -e DB_HOST=db -e DB_PORT=5432 --entrypoint sh api \
 | `DAILY_LIMIT_EXCEEDED` | 409 | превышен суточный или оконный лимит |
 | `IDEMPOTENCY_CONFLICT` | 422 | тот же ключ с другим телом |
 | `TRANSFER_NOT_FOUND` | 404 | перевода нет |
-| `PROVIDER_UNAVAILABLE` | 502 | провайдер недоступен |
+| `CLIENT_NOT_FOUND` | 404 | клиента нет |
+| `UNAUTHORIZED` | 401 | неверная или отсутствующая подпись вебхука `X-Signature` |
+| `SERVICE_UNAVAILABLE` | 503 | секрет вебхуков не настроен, сервис не готов принимать события |
+| `NOT_FOUND` | 404 | неизвестный путь |
+| `METHOD_NOT_ALLOWED` | 405 | метод не поддерживается для пути |
 
-Коды мок-провайдера (`RECIPIENT_ACCOUNT_INVALID`, `AMOUNT_OUT_OF_LIMITS`, `CURRENCY_NOT_SUPPORTED`, `PROVIDER_DISABLED`, `PROVIDER_MAINTENANCE`, `GATEWAY_TIMEOUT`) не пробрасываются наружу: они маппятся в статусы попыток (`FAILED` / `PROCESSING`) и видны в `GET /transfers/{id}`.
+Коды мок-провайдера не пробрасываются наружу: они маппятся во внутренние статусы попыток и видны в `GET /transfers/{id}`:
+
+| Код мок-провайдера | HTTP | Статус попытки | Дальше |
+| --- | --- | --- | --- |
+| `RECIPIENT_ACCOUNT_INVALID` | 422 | `FAILED` | следующий провайдер |
+| `AMOUNT_OUT_OF_LIMITS` | 422 | `FAILED` | следующий провайдер |
+| `CURRENCY_NOT_SUPPORTED` | 422 | `FAILED` | следующий провайдер |
+| `PROVIDER_DISABLED`, `PROVIDER_MAINTENANCE` | 503 | `FAILED` (`PROVIDER_UNAVAILABLE`) | следующий провайдер; такие провайдеры заранее отсекаются фильтром доступности |
+| `INTERNAL_ERROR` | 500 | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: повторный опрос, затем следующий провайдер |
+| `GATEWAY_TIMEOUT`, обрыв соединения, таймаут | 504 / нет ответа | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: `GET ?reference=`, затем следующий провайдер |
+| `IDEMPOTENCY_KEY_REUSED` | 409 | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: `GET ?reference=`, затем следующий провайдер |
 
 ## Документация
 

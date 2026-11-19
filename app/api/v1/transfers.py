@@ -1,3 +1,4 @@
+from datetime import timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Response, status
@@ -5,8 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mappers import balances_to_response, transfer_to_response
 from app.core.clock import now_utc
-from app.core.exceptions import TransferNotFoundError, ValidationError
+from app.core.exceptions import ClientNotFoundError, TransferNotFoundError, ValidationError
+from app.core.locks import transfer_lock
 from app.core.settings import settings
+from app.core.timeout import run_with_timeout
+from app.core.types import FlexibleUUID
 from app.db.engine import get_session
 from app.models.tables import Client
 from app.repositories import balances as balance_repo
@@ -20,16 +24,11 @@ from app.services import transfers as transfer_service
 router = APIRouter(tags=["transfers"])
 
 
-async def build_history(session: AsyncSession, transfer) -> list[tuple]:
-    items = [("PENDING", transfer.created_at, "client")]
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-    for attempt in attempts:
-        items.append((attempt.status, attempt.created_at, f"provider:{attempt.provider_id}"))
-    events = await transfer_repo.webhook_events_for_transfer(session, transfer.transfer_id.hex)
-    for event in events:
-        items.append((event.status, event.received_at, f"provider:{event.provider_id}"))
-    items.append((transfer.status, transfer.updated_at, "service"))
-    return items
+async def build_history(
+    session: AsyncSession, transfer, attempts: list | None = None
+) -> list[tuple]:
+    rows = await transfer_repo.history_for_transfer(session, transfer.transfer_id)
+    return [(row.to_status, row.at, row.actor) for row in rows]
 
 
 def require_idempotency_key(value: str | None) -> str:
@@ -44,17 +43,19 @@ async def load_transfer_view(session: AsyncSession, transfer_id: UUID) -> Transf
     if transfer is None:
         raise TransferNotFoundError(str(transfer_id))
     minor_units = await load_minor_units(session)
-    history = await build_history(session, transfer)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    history = await build_history(session, transfer, attempts)
     return transfer_to_response(transfer, attempts, history, minor_units)
 
 
 def respond_with_outcome(response: Response, transfer_id: UUID, final_status: str) -> None:
     if final_status == "COMPLETED":
         response.status_code = status.HTTP_201_CREATED
+        response.headers["Location"] = f"/transfers/{transfer_id}"
+    elif final_status == "FAILED":
+        response.status_code = status.HTTP_200_OK
     else:
         response.status_code = status.HTTP_202_ACCEPTED
-    response.headers["Location"] = f"/transfers/{transfer_id}"
 
 
 @router.post(
@@ -64,6 +65,7 @@ def respond_with_outcome(response: Response, transfer_id: UUID, final_status: st
     responses={
         201: {"description": "Перевод завершён синхронно"},
         202: {"description": "Перевод принят, итог позже"},
+        200: {"description": "Перевод завершён отказом (FAILED), итог известен"},
         404: {"model": ErrorResponse, "description": "QUOTE_NOT_FOUND"},
         409: {"model": ErrorResponse, "description": "INSUFFICIENT_FUNDS, DAILY_LIMIT_EXCEEDED"},
         410: {"model": ErrorResponse, "description": "QUOTE_EXPIRED"},
@@ -78,16 +80,31 @@ async def create_transfer(
 ) -> TransferResponse:
     key = require_idempotency_key(idempotency_key)
     now = now_utc()
-    transfer, _ = await transfer_service.create_transfer(
-        session,
-        settings,
-        request.quote_id,
-        request.client_id,
-        request.recipient.model_dump(),
-        key,
-        now,
-    )
-    final_status = await transfer_service.run_attempts(session, settings, transfer.transfer_id, now)
+
+    async def _on_timeout() -> str:
+        await session.rollback()
+        fresh = await transfer_repo.get_transfer(session, transfer.transfer_id)
+        assert fresh is not None
+        return fresh.status
+
+    async with transfer_lock(f"idem:{key}"):
+        transfer, _ = await transfer_service.create_transfer(
+            session,
+            settings,
+            request.quote_id,
+            request.client_id,
+            request.recipient.model_dump(),
+            key,
+            now,
+        )
+    async with transfer_lock(f"tx:{transfer.transfer_id}"):
+        final_status = await run_with_timeout(
+            lambda: transfer_service.run_attempts(
+                session, settings, transfer.transfer_id, now, "client"
+            ),
+            timedelta(seconds=settings.api_sync_timeout_sec),
+            _on_timeout,
+        )
     respond_with_outcome(response, transfer.transfer_id, final_status)
     return await load_transfer_view(session, transfer.transfer_id)
 
@@ -102,7 +119,7 @@ async def create_transfer(
     },
 )
 async def read_transfer(
-    transfer_id: UUID, session: AsyncSession = Depends(get_session)
+    transfer_id: FlexibleUUID, session: AsyncSession = Depends(get_session)
 ) -> TransferResponse:
     return await load_transfer_view(session, transfer_id)
 
@@ -111,13 +128,18 @@ async def read_transfer(
     "/clients/{client_id}/balance",
     response_model=BalanceResponse,
     summary="Баланс клиента",
+    responses={
+        200: {"description": "Доступный остаток, резерв и списания по каждой валюте"},
+        404: {"model": ErrorResponse, "description": "CLIENT_NOT_FOUND"},
+        422: {"model": ErrorResponse, "description": "VALIDATION_ERROR"},
+    },
 )
 async def read_balance(
     client_id: str, session: AsyncSession = Depends(get_session)
 ) -> BalanceResponse:
     client = await session.get(Client, client_id)
     if client is None:
-        raise ValidationError(f"unknown client {client_id}")
+        raise ClientNotFoundError(f"unknown client {client_id}")
     rows = await balance_repo.get_balances(session, client_id)
     minor_units = await load_minor_units(session)
     return balances_to_response(client_id, rows, minor_units)

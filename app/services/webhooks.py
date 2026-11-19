@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import re
 from datetime import datetime
 
@@ -8,13 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import as_utc, now_utc
 from app.core.exceptions import ServiceUnavailableError, UnauthorizedError, ValidationError
+from app.core.metrics import inc as metrics_inc
 from app.core.settings import Settings
 from app.models.tables import Provider, WebhookEvent
 from app.repositories import transfers as transfer_repo
 from app.schemas.webhooks import WebhookEvent as WebhookEventSchema
 from app.services.providers import ProviderClient
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
-from app.services.transfers import run_attempts
+from app.services.transfers import run_attempts_locked as run_attempts
+
+logger = logging.getLogger("transfer-core.webhooks")
 
 PAYOUT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -36,13 +40,16 @@ async def handle_webhook(
     signature: str | None,
     now: datetime,
 ) -> None:
-    provider = await session.get(Provider, provider_id)
-    if provider is None:
-        raise ValidationError(f"unknown provider {provider_id}")
     if not settings.provider_webhook_secret:
         raise ServiceUnavailableError("webhook secret is not configured")
     if not verify_signature(settings.provider_webhook_secret, body, signature):
+        metrics_inc("webhook_invalid_signature_total")
         raise UnauthorizedError("invalid webhook signature")
+    provider = await session.get(Provider, provider_id)
+    if provider is None:
+        metrics_inc("webhook_unknown_provider_total")
+        logger.warning("webhook for unknown provider", extra={"provider_id": provider_id})
+        raise ValidationError(f"unknown provider {provider_id}")
     event = EVENT_ADAPTER.validate_json(body)
     occurred_at = as_utc(event.occurred_at)
     if not PAYOUT_ID_RE.fullmatch(event.payout_id):
@@ -74,6 +81,11 @@ async def _process_event(
 ) -> None:
     transfer = await transfer_repo.get_transfer_by_reference(session, event.reference)
     if transfer is None:
+        metrics_inc("webhook_unknown_reference_total")
+        logger.warning(
+            "webhook for unknown reference",
+            extra={"provider_id": provider_id, "reference": event.reference},
+        )
         return
     if transfer.status in TERMINAL:
         return
@@ -86,11 +98,22 @@ async def _process_event(
         return
     attempt = await transfer_repo.find_attempt_by_payout(session, provider_id, event.payout_id)
     if attempt is not None and attempt.transfer_id != transfer.transfer_id:
+        metrics_inc("webhook_foreign_payout_total")
+        logger.warning(
+            "webhook payout belongs to another transfer",
+            extra={
+                "provider_id": provider_id,
+                "payout_id": event.payout_id,
+                "reference": event.reference,
+            },
+        )
         return
     client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
     state = await client.get_payout(provider_id, event.payout_id)
     if state is None:
         state = await client.find_payout(provider_id, event.reference)
+    if state is None:
+        return
     if state is not None and state.reference and state.reference != event.reference:
         return
     if event.status == "COMPLETED":
@@ -98,10 +121,13 @@ async def _process_event(
             return
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
         if locked is not None:
-            await TransferStateMachine(session, locked).complete(now_utc())
+            machine = TransferStateMachine(session, locked)
+            await machine.complete(now_utc(), f"provider:{provider_id}")
             await session.commit()
         return
     if event.status == "FAILED":
         if state is not None and state.status == "COMPLETED":
             return
-        await run_attempts(session, settings, transfer.transfer_id, now_utc())
+        await run_attempts(
+            session, settings, transfer.transfer_id, now_utc(), f"provider:{provider_id}"
+        )

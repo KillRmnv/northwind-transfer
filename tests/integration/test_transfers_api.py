@@ -40,19 +40,29 @@ async def post_transfer(api, quote_id, client_id="c_001", key="key-1"):
     )
 
 
-def patch_provider(monkeypatch, create=None, get=None, find=None):
+def patch_provider(monkeypatch, create=None, get=None, find=None, probe=None):
     if create is not None:
         monkeypatch.setattr(providers_module.ProviderClient, "create_payout", create)
     if get is not None:
         monkeypatch.setattr(providers_module.ProviderClient, "get_payout", get)
     if find is not None:
         monkeypatch.setattr(providers_module.ProviderClient, "find_payout", find)
-
-        async def probe(self, provider_id, reference, _find=find):
-            state = await _find(self, provider_id, reference)
-            return ("found" if state is not None else "missing"), state
-
+    if probe is not None:
         monkeypatch.setattr(providers_module.ProviderClient, "probe_payout", probe)
+    elif get is not None or find is not None:
+        _get, _find = get, find
+
+        async def probe_via_get_find(self, provider_id, reference, _get=_get, _find=_find):
+            if _get is not None:
+                state = await _get(self, provider_id, "probe-payout-id")
+                if state is not None:
+                    return "found", state
+            if _find is not None:
+                state = await _find(self, provider_id, reference)
+                return ("found" if state is not None else "missing"), state
+            return "missing", None
+
+        monkeypatch.setattr(providers_module.ProviderClient, "probe_payout", probe_via_get_find)
 
 
 def accept_factory(payout_id="po_test_1"):
@@ -139,7 +149,7 @@ async def test_transfer_all_decline_releases_reserve(
 
     response = await post_transfer(api, quote["quote_id"], key="key-decline")
     with check:
-        assert response.status_code in (201, 202)
+        assert response.status_code == 200
     with check:
         assert response.json()["status"] == "FAILED"
     balance = (await api.get("/clients/c_001/balance")).json()
@@ -344,3 +354,64 @@ async def test_too_long_idempotency_key_rejected(api, freeze_rates, live_rates) 
         assert response.status_code == 422
     with check:
         assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_same_key_different_clients_creates_two_transfers(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    patch_provider(
+        monkeypatch, create=accept_factory("po-shared"), get=complete_getter(), find=no_find
+    )
+    quote = await make_quote(api, freeze_rates, live_rates)
+    first = await post_transfer(api, quote["quote_id"], client_id="c_001", key="shared-key")
+    second = await post_transfer(api, quote["quote_id"], client_id="c_002", key="shared-key")
+    with check:
+        assert first.status_code == 201
+    with check:
+        assert second.status_code == 201
+    with check:
+        assert first.json()["transfer_id"] != second.json()["transfer_id"]
+
+
+async def test_balance_invariant_holds_after_completed_and_failed(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    patch_provider(
+        monkeypatch, create=accept_factory("po-inv"), get=complete_getter(), find=no_find
+    )
+    quote = await make_quote(api, freeze_rates, live_rates)
+    created = await post_transfer(api, quote["quote_id"], key="inv-1")
+    with check:
+        assert created.status_code == 201
+
+    async def fake_decline(self, *args, **kwargs):
+        from app.services import providers as providers_module
+
+        return providers_module.Declined(failure_code="RECIPIENT_ACCOUNT_INVALID")
+
+    patch_provider(monkeypatch, create=fake_decline)
+    quote2 = await make_quote(api, freeze_rates, live_rates)
+    failed = await post_transfer(api, quote2["quote_id"], key="inv-2")
+    with check:
+        assert failed.status_code == 200
+
+    from decimal import Decimal as D
+
+    balance = (await api.get("/clients/c_001/balance")).json()["balances"]["RUB"]
+    total = D(balance["available"]) + D(balance["reserved"]) + D(balance["spent"])
+    with check:
+        assert balance["available"] == "490000.00"
+    with check:
+        assert balance["reserved"] == "0.00"
+    with check:
+        assert balance["spent"] == "10000.00"
+    with check:
+        assert total == D("500000.00")
+
+
+async def test_transfer_not_found(api) -> None:
+    response = await api.get("/transfers/123e4567-e89b-12d3-a456-426614174000")
+    with check:
+        assert response.status_code == 404
+    with check:
+        assert response.json()["error"]["code"] == "TRANSFER_NOT_FOUND"

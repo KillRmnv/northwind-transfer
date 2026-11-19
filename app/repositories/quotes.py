@@ -26,6 +26,7 @@ async def save_quote(
             rate=result.rate,
             target_amount=result.target_amount,
             target_currency=result.target_currency,
+            breakdown=result.breakdown,
             expires_at=expires_at,
             created_at=created_at,
         )

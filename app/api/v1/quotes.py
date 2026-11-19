@@ -9,9 +9,10 @@ from app.core.clock import as_utc, now_utc
 from app.core.exceptions import (
     QuoteExpiredError,
     QuoteNotFoundError,
+    RateUnavailableError,
     ValidationError,
 )
-from app.core.money import amount_string_is_valid
+from app.core.money import amount_string_is_valid, ensure_storable
 from app.core.parse import parse_decimal
 from app.core.settings import settings
 from app.db.engine import get_session
@@ -51,8 +52,11 @@ router = APIRouter(tags=["quotes"])
 async def create_quote(
     request: QuoteRequest, response: Response, session: AsyncSession = Depends(get_session)
 ) -> QuoteResponse:
-    source_currency = request.source_currency.upper()
-    target_currency = request.target_currency.upper()
+    source_country = request.source_country.strip().upper()
+    source_currency = request.source_currency.strip().upper()
+    target_country = request.target_country.strip().upper()
+    target_currency = request.target_currency.strip().upper()
+    payout_method = request.payout_method.strip()
     now = now_utc()
     minor_units = await load_minor_units(session)
     if source_currency not in minor_units or target_currency not in minor_units:
@@ -60,11 +64,11 @@ async def create_quote(
     tariffs = await load_tariffs(session)
     tariff = find_direction(
         tariffs,
-        request.source_country.upper(),
+        source_country,
         source_currency,
-        request.target_country.upper(),
+        target_country,
         target_currency,
-        request.payout_method,
+        payout_method,
     )
     amount_currency = source_currency if request.amount_type == "SOURCE" else target_currency
     if not amount_string_is_valid(request.amount, minor_units[amount_currency]):
@@ -84,11 +88,21 @@ async def create_quote(
         result = calculate_source(amount, tariff, rate, minor_units)
     else:
         result = calculate_target(amount, tariff, rate, minor_units)
-    check_limits(
-        amount_in_limit_currency(result.source_amount, tariff.source_currency, tariff, rate),
-        tariff,
-        minor_units,
+    ensure_storable(
+        result.source_amount,
+        result.fee_amount,
+        result.amount_to_convert,
+        result.target_amount,
+        field="quote amount",
     )
+    limit_amount = amount_in_limit_currency(
+        result.source_amount, tariff.source_currency, tariff, rate
+    )
+    if limit_amount is None:
+        raise RateUnavailableError(
+            f"cannot convert {tariff.source_currency} to limit currency {tariff.limit_currency}"
+        )
+    check_limits(limit_amount, tariff, minor_units)
     expires_at = now + timedelta(seconds=tariff.quote_ttl_sec)
     quote_id = await save_quote(session, result, expires_at, now)
     response.headers["Location"] = f"/quotes/{quote_id}"

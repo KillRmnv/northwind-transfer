@@ -62,6 +62,7 @@ def test_balances_to_response_keeps_available_and_reserved() -> None:
     class Row:
         available = Decimal("490000.00")
         reserved = Decimal("10000.00")
+        spent = Decimal("0")
 
     response = mappers.balances_to_response("c_001", {"RUB": Row()}, MINOR)
     with check:

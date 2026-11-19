@@ -4,10 +4,11 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import DailyLimitExceededError
+from app.core.exceptions import DailyLimitExceededError, RateUnavailableError
 from app.core.money import format_money
 from app.models.tables import Client, LimitDefinition
 from app.repositories.transfers import sum_day_source, sum_window_source
+from app.services.providers import convert_amount
 
 
 def day_bounds(now: datetime) -> tuple[datetime, datetime]:
@@ -50,6 +51,8 @@ async def check_daily_limit(
     if client is None:
         return
     limit_currency = client.daily_limit_currency
+    flat = {pair: _rate_value(rate) for pair, rate in (live_rates or {}).items()}
+    flat_rates = {pair: value for pair, value in flat.items() if value is not None}
     start, end = day_bounds(now)
     rows = await sum_day_source(session, client_id, start, end)
     spent = Decimal("0")
@@ -57,17 +60,22 @@ async def check_daily_limit(
         converted = await to_limit_currency(
             amount, currency, limit_currency, quote_rate, quote_source, quote_target
         )
-        if converted is None and live_rates:
-            converted = convert_via_rates(amount, currency, limit_currency, live_rates)
-        if converted is not None:
-            spent += converted
+        if converted is None:
+            converted = convert_amount(amount, currency, limit_currency, flat_rates)
+        if converted is None:
+            raise RateUnavailableError(
+                f"cannot convert {currency} to limit currency {limit_currency}"
+            )
+        spent += converted
     addition = await to_limit_currency(
         source_amount, source_currency, limit_currency, quote_rate, quote_source, quote_target
     )
-    if addition is None and live_rates:
-        addition = convert_via_rates(source_amount, source_currency, limit_currency, live_rates)
     if addition is None:
-        return
+        addition = convert_amount(source_amount, source_currency, limit_currency, flat_rates)
+    if addition is None:
+        raise RateUnavailableError(
+            f"cannot convert {source_currency} to limit currency {limit_currency}"
+        )
     limit = Decimal(client.daily_limit_amount)
     if spent + addition > limit:
         raise DailyLimitExceededError(
@@ -98,10 +106,11 @@ async def check_limit_definitions(
         .scalars()
         .all()
     )
+
+    flat_rates = {pair: _rate_value(rate) for pair, rate in live_rates.items()}
+    flat_rates = {pair: value for pair, value in flat_rates.items() if value is not None}
     for definition in rows:
         if definition.scope == "direction" and definition.direction_id != tariff_direction_id:
-            continue
-        if definition.scope == "category":
             continue
         weight = Decimal(definition.weight)
         if weight <= 0:
@@ -129,23 +138,30 @@ async def check_limit_definitions(
             converted = await to_limit_currency(
                 amount, currency, definition.currency, rate, currency, target_currency
             )
-            if converted is not None:
-                total += converted * weight
-        live_rate = live_rates.get((source_currency, definition.currency))
+            if converted is None:
+                converted = convert_amount(amount, currency, definition.currency, flat_rates)
+            if converted is None:
+                raise RateUnavailableError(
+                    f"cannot convert {currency} to limit currency {definition.currency}"
+                )
+            total += converted * weight
+        live_rate = flat_rates.get((source_currency, definition.currency))
         addition = await to_limit_currency(
             source_amount,
             source_currency,
             definition.currency,
-            _rate_value(live_rate),
+            live_rate,
             source_currency,
             definition.currency,
         )
         if addition is None:
-            addition = convert_via_rates(
-                source_amount, source_currency, definition.currency, live_rates
+            addition = convert_amount(
+                source_amount, source_currency, definition.currency, flat_rates
             )
         if addition is None:
-            continue
+            raise RateUnavailableError(
+                f"cannot convert {source_currency} to limit currency {definition.currency}"
+            )
         if total + addition * weight > Decimal(definition.amount):
             raise DailyLimitExceededError(
                 f"limit {definition.scope}/{definition.period_type} exceeded for {client_id}",
@@ -163,8 +179,9 @@ def convert_via_rates(
     amount: Decimal,
     amount_currency: str,
     target_currency: str,
-    live_rates: dict[tuple[str, str], Decimal],
+    live_rates: dict,
 ) -> Decimal | None:
-    from app.services.providers import convert_amount
 
-    return convert_amount(amount, amount_currency, target_currency, live_rates)
+    flat = {pair: _rate_value(rate) for pair, rate in live_rates.items()}
+    flat = {pair: value for pair, value in flat.items() if value is not None}
+    return convert_amount(amount, amount_currency, target_currency, flat)

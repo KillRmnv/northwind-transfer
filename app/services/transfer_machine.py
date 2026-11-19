@@ -8,14 +8,16 @@ from app.models.tables import Transfer
 from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 
-TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+TERMINAL = frozenset({"COMPLETED", "FAILED"})
+
+NEEDS_REVIEW = "NEEDS_REVIEW"
 
 EDGES: dict[str, frozenset[str]] = {
-    "PENDING": frozenset({"PROCESSING", "COMPLETED", "FAILED", "CANCELLED"}),
-    "PROCESSING": frozenset({"COMPLETED", "FAILED", "CANCELLED"}),
+    "PENDING": frozenset({"PROCESSING", "COMPLETED", "FAILED", "NEEDS_REVIEW"}),
+    "PROCESSING": frozenset({"COMPLETED", "FAILED", "NEEDS_REVIEW"}),
+    "NEEDS_REVIEW": frozenset({"PROCESSING", "COMPLETED", "FAILED"}),
     "COMPLETED": frozenset(),
     "FAILED": frozenset(),
-    "CANCELLED": frozenset(),
 }
 
 PAYOUT_SETTLEMENT = {"COMPLETED": "complete", "FAILED": "retry"}
@@ -33,20 +35,24 @@ class TransferStateMachine:
     def can(self, target: str) -> bool:
         return target in EDGES.get(self.status, frozenset())
 
-    async def start(self, now: datetime) -> bool:
+    async def start(self, now: datetime, actor: str = "service") -> bool:
         if not self.can("PROCESSING"):
             return False
+        previous = self._transfer.status
         moved = await transfer_repo.set_status_if_unsettled(
             self._session, self._transfer.transfer_id, "PROCESSING", now
         )
         if moved:
+            await transfer_repo.record_transition(
+                self._session, self._transfer.transfer_id, previous, "PROCESSING", actor, now
+            )
             await self._session.refresh(self._transfer)
         return moved
 
-    async def complete(self, now: datetime) -> bool:
+    async def complete(self, now: datetime, actor: str = "service") -> bool:
         if not self.can("COMPLETED"):
             return False
-        settled = await self._settle("COMPLETED", now)
+        settled = await self._settle("COMPLETED", now, actor)
         if not settled:
             return False
         await balance_repo.consume_reserve(
@@ -59,10 +65,10 @@ class TransferStateMachine:
         await self._session.refresh(self._transfer)
         return True
 
-    async def fail(self, now: datetime) -> bool:
+    async def fail(self, now: datetime, actor: str = "service") -> bool:
         if not self.can("FAILED"):
             return False
-        settled = await self._settle("FAILED", now)
+        settled = await self._settle("FAILED", now, actor)
         if not settled:
             return False
         await balance_repo.release_reserve(
@@ -75,23 +81,62 @@ class TransferStateMachine:
         await self._session.refresh(self._transfer)
         return True
 
-    async def settle_from_payout(self, payout_status: str, now: datetime) -> str:
+    async def needs_review(self, now: datetime, actor: str = "service") -> bool:
+        if not self.can(NEEDS_REVIEW):
+            return False
+        previous = self._transfer.status
+        moved = await transfer_repo.set_status_if_unsettled(
+            self._session, self._transfer.transfer_id, NEEDS_REVIEW, now
+        )
+        if moved:
+            await transfer_repo.record_transition(
+                self._session,
+                self._transfer.transfer_id,
+                previous,
+                NEEDS_REVIEW,
+                actor,
+                now,
+            )
+            await self._session.refresh(self._transfer)
+        return moved
+
+    async def settle_from_payout(
+        self, payout_status: str, now: datetime, actor: str = "service"
+    ) -> str:
+        if self._transfer.status in TERMINAL:
+            return self._transfer.status
         action = PAYOUT_SETTLEMENT.get(payout_status, "wait")
         if action == "complete":
-            await self.complete(now)
-            return "COMPLETED"
-        if action == "retry":
+            await self.complete(now, actor)
+        elif action == "retry":
             return "RETRY"
+        await self._session.refresh(self._transfer)
+        if self._transfer.status in TERMINAL:
+            return self._transfer.status
         return "PROCESSING"
 
-    async def repair(self, target: str, now: datetime) -> bool:
+    async def repair(self, target: str, now: datetime, actor: str = "service") -> bool:
+        await self._session.refresh(self._transfer)
         if self.status in TERMINAL:
             return False
-        return await transfer_repo.force_status(
+        if not self._transfer.funds_settled:
+            if target == "COMPLETED":
+                return await self.complete(now, actor)
+            if target == "FAILED":
+                return await self.fail(now, actor)
+            return False
+        moved = await transfer_repo.force_status(
             self._session, self._transfer.transfer_id, target, now
         )
+        if moved:
+            await transfer_repo.record_transition(
+                self._session, self._transfer.transfer_id, self.status, target, actor, now
+            )
+            await self._session.refresh(self._transfer)
+        return moved
 
-    async def _settle(self, target: str, now: datetime) -> bool:
+    async def _settle(self, target: str, now: datetime, actor: str) -> bool:
+        previous = self._transfer.status
         result = await self._session.execute(
             sa.update(Transfer)
             .where(
@@ -101,7 +146,12 @@ class TransferStateMachine:
             )
             .values(status=target, funds_settled=True, updated_at=now)
         )
-        return result.rowcount == 1
+        if result.rowcount != 1:
+            return False
+        await transfer_repo.record_transition(
+            self._session, self._transfer.transfer_id, previous, target, actor, now
+        )
+        return True
 
     async def _sync_attempt(self, status: str, now: datetime) -> None:
         attempts = await transfer_repo.latest_attempts(self._session, self._transfer.transfer_id)

@@ -35,6 +35,39 @@ async def lock_client(session: AsyncSession, client_id: str):
     return (await session.execute(query)).scalar_one_or_none()
 
 
+async def record_transition(
+    session: AsyncSession,
+    transfer_id,
+    from_status: str | None,
+    to_status: str,
+    actor: str,
+    now: datetime,
+) -> None:
+    from app.models.tables import TransferStatusHistory
+
+    session.add(
+        TransferStatusHistory(
+            transfer_id=transfer_id,
+            from_status=from_status,
+            to_status=to_status,
+            actor=actor,
+            at=now,
+        )
+    )
+    await session.flush()
+
+
+async def history_for_transfer(session: AsyncSession, transfer_id) -> list:
+    from app.models.tables import TransferStatusHistory
+
+    query = (
+        sa.select(TransferStatusHistory)
+        .where(TransferStatusHistory.transfer_id == transfer_id)
+        .order_by(TransferStatusHistory.at, TransferStatusHistory.id)
+    )
+    return list((await session.execute(query)).scalars().all())
+
+
 async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Transfer | None:
     try:
         transfer_id = uuid.UUID(reference)
@@ -43,8 +76,12 @@ async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Tr
     return await get_transfer(session, transfer_id)
 
 
-async def get_by_idempotency_key(session: AsyncSession, key: str) -> Transfer | None:
+async def get_by_idempotency_key(
+    session: AsyncSession, key: str, client_id: str | None = None
+) -> Transfer | None:
     query = sa.select(Transfer).where(Transfer.idempotency_key == key)
+    if client_id is not None:
+        query = query.where(Transfer.client_id == client_id)
     return (await session.execute(query)).scalar_one_or_none()
 
 
@@ -80,7 +117,7 @@ async def create_transfer_or_existing(
             await session.flush()
         return row, True
     except IntegrityError as exc:
-        winner = await get_by_idempotency_key(session, idempotency_key)
+        winner = await get_by_idempotency_key(session, idempotency_key, client_id)
         if winner is None:
             raise
         if winner.idempotency_hash != idempotency_hash:
@@ -88,44 +125,12 @@ async def create_transfer_or_existing(
         return winner, False
 
 
-async def create_transfer(
-    session: AsyncSession,
-    quote: Quote,
-    client_id: str,
-    recipient: dict,
-    idempotency_key: str,
-    idempotency_hash: str,
-    now: datetime,
-) -> Transfer:
-    row = Transfer(
-        transfer_id=uuid.uuid4(),
-        quote_id=quote.quote_id,
-        client_id=client_id,
-        status="PENDING",
-        source_amount=quote.source_amount,
-        source_currency=quote.source_currency,
-        target_amount=quote.target_amount,
-        target_currency=quote.target_currency,
-        recipient_name=recipient.get("name", ""),
-        recipient_account=recipient["account"],
-        recipient_bank=recipient.get("bank_code", ""),
-        idempotency_key=idempotency_key,
-        idempotency_hash=idempotency_hash,
-        funds_settled=False,
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(row)
-    await session.flush()
-    return row
-
-
 async def force_status(session: AsyncSession, transfer_id, status: str, now: datetime) -> bool:
     result = await session.execute(
         sa.update(Transfer)
         .where(
             Transfer.transfer_id == transfer_id,
-            Transfer.status.not_in(["COMPLETED", "FAILED", "CANCELLED"]),
+            Transfer.status.not_in(["COMPLETED", "FAILED"]),
         )
         .values(status=status, updated_at=now)
     )
@@ -140,26 +145,25 @@ async def set_status_if_unsettled(
         .where(
             Transfer.transfer_id == transfer_id,
             Transfer.funds_settled.is_(False),
-            Transfer.status.not_in(["COMPLETED", "FAILED", "CANCELLED"]),
+            Transfer.status.not_in(["COMPLETED", "FAILED"]),
         )
         .values(status=status, updated_at=now)
     )
     return result.rowcount == 1
 
 
-async def set_status(session: AsyncSession, transfer: Transfer, status: str, now: datetime) -> None:
-    transfer.status = status
-    transfer.updated_at = now
-    await session.flush()
-
-
-async def list_open_transfers(session: AsyncSession, limit: int = 100) -> list[Transfer]:
+async def list_open_transfers(
+    session: AsyncSession, limit: int = 100, skip_locked: bool = False
+) -> list[Transfer]:
     query = (
         sa.select(Transfer)
-        .where(Transfer.status.in_(["PENDING", "PROCESSING"]))
-        .order_by(Transfer.created_at)
+        .where(Transfer.status.in_(["PENDING", "PROCESSING", "NEEDS_REVIEW"]))
+        .order_by(Transfer.updated_at)
         .limit(limit)
     )
+    bind = session.bind
+    if skip_locked and bind is not None and bind.dialect.name != "sqlite":
+        query = query.with_for_update(skip_locked=True)
     return list((await session.execute(query)).scalars().all())
 
 
@@ -232,22 +236,46 @@ async def record_attempt(
     payout_id: str | None,
     now: datetime,
 ) -> PayoutAttempt:
-    row = PayoutAttempt(
-        transfer_id=transfer_id,
-        provider_id=provider_id,
-        payout_id=payout_id,
-        reference=reference,
-        amount=amount,
-        currency=currency,
-        status=status,
-        failure_code=failure_code,
-        attempt_no=attempt_no,
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(row)
-    await session.flush()
-    return row
+    try:
+        async with session.begin_nested():
+            row = PayoutAttempt(
+                transfer_id=transfer_id,
+                provider_id=provider_id,
+                payout_id=payout_id,
+                reference=reference,
+                amount=amount,
+                currency=currency,
+                status=status,
+                failure_code=failure_code,
+                attempt_no=attempt_no,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+        return row
+    except IntegrityError:
+        existing = await latest_attempts(session, transfer_id)
+        taken = {attempt.attempt_no for attempt in existing}
+        retry_no = attempt_no
+        while retry_no in taken:
+            retry_no += 1
+        row = PayoutAttempt(
+            transfer_id=transfer_id,
+            provider_id=provider_id,
+            payout_id=payout_id,
+            reference=reference,
+            amount=amount,
+            currency=currency,
+            status=status,
+            failure_code=failure_code,
+            attempt_no=retry_no,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.flush()
+        return row
 
 
 async def update_attempt(
@@ -298,19 +326,23 @@ async def store_webhook_event(
     existing = await session.get(WebhookEvent, event_id)
     if existing is not None:
         return False
-    session.add(
-        WebhookEvent(
-            event_id=event_id,
-            provider_id=provider_id,
-            payout_id=payout_id,
-            reference=reference,
-            status=status,
-            occurred_at=occurred_at,
-            received_at=now,
-        )
-    )
-    await session.flush()
-    return True
+    try:
+        async with session.begin_nested():
+            session.add(
+                WebhookEvent(
+                    event_id=event_id,
+                    provider_id=provider_id,
+                    payout_id=payout_id,
+                    reference=reference,
+                    status=status,
+                    occurred_at=occurred_at,
+                    received_at=now,
+                )
+            )
+            await session.flush()
+        return True
+    except IntegrityError:
+        return False
 
 
 async def webhook_events_for_transfer(session: AsyncSession, reference: str) -> list[WebhookEvent]:

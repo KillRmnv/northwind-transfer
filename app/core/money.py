@@ -1,4 +1,15 @@
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+
+STORAGE_CEILING = Decimal("999999999999.99999999")
+
+
+def ceil_to_minor(value: Decimal, minor_units: int) -> Decimal:
+    return value.quantize(quantum(minor_units), rounding=ROUND_CEILING)
+
+
+def quantize_rate(rate: Decimal, places: int = 4) -> Decimal:
+    quantum = Decimal("1." + "0" * places)
+    return rate.quantize(quantum, rounding=ROUND_HALF_UP)
 
 
 def quantum(minor_units: int) -> Decimal:
@@ -30,3 +41,11 @@ def amount_string_is_valid(text: str, minor_units: int) -> bool:
 
 def parse_money(text: str) -> Decimal:
     return Decimal(text)
+
+
+def ensure_storable(*amounts: Decimal, field: str = "amount") -> None:
+    from app.core.exceptions import ValidationError
+
+    for amount in amounts:
+        if abs(amount) > STORAGE_CEILING:
+            raise ValidationError(f"{field} exceeds storage precision")

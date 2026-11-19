@@ -86,11 +86,6 @@ class Declined:
 
 
 @dataclass(frozen=True)
-class ServerError:
-    status_code: int
-
-
-@dataclass(frozen=True)
 class UnknownResult:
     reason: str
 
@@ -103,7 +98,7 @@ class PayoutState:
     failure_code: str | None
 
 
-CreateOutcome = Accepted | Declined | ServerError | UnknownResult
+CreateOutcome = Accepted | Declined | UnknownResult
 
 
 def _coerce_uuid(value: Any) -> uuid.UUID:

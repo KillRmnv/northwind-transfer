@@ -7,7 +7,7 @@ from app.core.settings import Settings
 from app.repositories import transfers as transfer_repo
 from app.services.providers import ProviderClient
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
-from app.services.transfers import run_attempts
+from app.services.transfers import run_attempts_locked as run_attempts
 
 
 def empty_stats() -> dict[str, int]:
@@ -15,7 +15,7 @@ def empty_stats() -> dict[str, int]:
 
 
 async def list_open_transfers(session: AsyncSession, limit: int = 200) -> list:
-    return await transfer_repo.list_open_transfers(session, limit=limit)
+    return await transfer_repo.list_open_transfers(session, limit=limit, skip_locked=True)
 
 
 async def reconcile_once(session: AsyncSession, settings: Settings, now: datetime) -> dict:
@@ -52,14 +52,15 @@ async def _reconcile_one(
     now: datetime,
     stats: dict,
 ) -> None:
+    await session.refresh(transfer)
     if transfer.status == "PENDING":
-        status = await run_attempts(session, settings, transfer.transfer_id, now_utc())
+        status = await run_attempts(session, settings, transfer.transfer_id, now_utc(), "reconcile")
         _tally(stats, status)
         return
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
     if not live:
-        status = await run_attempts(session, settings, transfer.transfer_id, now_utc())
+        status = await run_attempts(session, settings, transfer.transfer_id, now_utc(), "reconcile")
         _tally(stats, status)
         return
     attempt = live[-1]
@@ -70,7 +71,13 @@ async def _reconcile_one(
         stats["still_open"] += 1
         return
     fresh = await transfer_repo.get_transfer(session, transfer.transfer_id)
-    if fresh is not None and fresh.status in TERMINAL:
+    if fresh is None:
+        stats["still_open"] += 1
+        return
+    if fresh.status == "COMPLETED":
+        stats["completed"] += 1
+        return
+    if fresh.status in TERMINAL:
         stats["still_open"] += 1
         return
     if attempt.status != state.status or attempt.payout_id != state.payout_id:
@@ -80,18 +87,19 @@ async def _reconcile_one(
         await session.commit()
     if state.status == "COMPLETED":
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
-        if locked is not None and locked.status not in TERMINAL:
-            machine = TransferStateMachine(session, locked)
-            done = await machine.complete(now_utc())
-            if not done:
-                await machine.repair("COMPLETED", now_utc())
-            await session.commit()
-            stats["completed"] += 1
+        if locked is None or locked.status in TERMINAL:
+            await session.refresh(transfer)
+            stats["completed" if transfer.status == "COMPLETED" else "still_open"] += 1
             return
-        stats["still_open"] += 1
+        machine = TransferStateMachine(session, locked)
+        done = await machine.complete(now_utc(), "reconcile")
+        if not done:
+            done = await machine.repair("COMPLETED", now_utc(), "reconcile")
+        await session.commit()
+        stats["completed" if done else "still_open"] += 1
         return
     if state.status == "FAILED":
-        status = await run_attempts(session, settings, transfer.transfer_id, now_utc())
+        status = await run_attempts(session, settings, transfer.transfer_id, now_utc(), "reconcile")
         _tally(stats, status)
         return
     stats["still_open"] += 1

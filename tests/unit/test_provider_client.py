@@ -169,4 +169,24 @@ def test_unknown_outcome_types_are_distinct() -> None:
     with check:
         assert not isinstance(Accepted(payout_id="x", status="PROCESSING"), Declined)
     with pytest.raises(TypeError):
-        UnknownResult()
+        UnknownResult()  # type: ignore[call-arg]
+
+
+@respx.mock
+async def test_unknown_provider_status_coerced_to_processing() -> None:
+    respx.get(f"{BASE}/prov_alpha/payouts/po_x").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "payout_id": "po_x",
+                "reference": "ref",
+                "status": "PENGING",
+                "failure_code": None,
+            },
+        )
+    )
+    state = await client().get_payout("prov_alpha", "po_x")
+    with check:
+        assert state is not None
+    with check:
+        assert state is not None and state.status == "PROCESSING"

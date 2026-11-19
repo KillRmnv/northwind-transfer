@@ -1,13 +1,16 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError as PydanticValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.exception_handlers import (
     domain_error_handler,
+    http_exception_handler,
     pydantic_validation_handler,
     request_validation_handler,
     unhandled_error_handler,
@@ -57,7 +60,7 @@ async def reconcile_loop() -> None:
             raise
         except Exception as exc:
             logger.warning("reconcile pass failed: %s", exc)
-        await asyncio.sleep(settings.reconcile_interval_sec)
+        await asyncio.sleep(timedelta(seconds=settings.reconcile_interval_sec).total_seconds())
 
 
 @asynccontextmanager
@@ -80,11 +83,13 @@ def create_app() -> FastAPI:
     app.add_exception_handler(DomainError, domain_error_handler)
     app.add_exception_handler(RequestValidationError, request_validation_handler)
     app.add_exception_handler(PydanticValidationError, pydantic_validation_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         request_id = new_request_id()
+        request.state.request_id = request_id
         token = request_id_var.set(request_id)
         try:
             response = await call_next(request)

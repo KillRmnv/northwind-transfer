@@ -22,12 +22,13 @@
 | 1 | Имена полей `POST /quotes` по §6 | точное соответствие, лишний компонент = смена контракта |
 | 2 | Ответ `201` содержит `quote_id, direction_id, source_amount, fee, amount_to_convert, rate, target_amount, breakdown, expires_at` | все поля, деньги — строки по `minor_units` |
 | 3 | `amount` на границах min/max направления (min−ε, min, max, max+ε) | ниже → `AMOUNT_BELOW_MIN`, выше → `AMOUNT_ABOVE_MAX` |
+| 3b | `amount_type=TARGET` у верхней границы: вычисленный `source_amount` превышает `max` | `AMOUNT_ABOVE_MAX` — лимит проверяется по вычисленному `source_amount`, а не по входной сумме (пример: `RU-TH-BANK` 126000 THB → source 300217.55 > max 300000) |
 | 4 | Нет направления / способа выплаты | `UNSUPPORTED_DIRECTION` |
 | 5 | `amount_type=TARGET` | инверсия D3, сверка прямым прогоном SOURCE (examples #1↔#3) |
 | 6 | TARGET с округлением в 1 minor unit | детерминированное правило «округление последней операции вверх» (A2) |
 | 7 | `charged_in=TARGET` (RU-VN-BANK, KW-JP-BANK) | комиссия в валюте получателя, пересчёт явным шагом в `breakdown` |
 | 8 | Минимальная комиссия (`min`) | срабатывает минимум (пример §9 #2: 2000 RUB → 50 RUB) |
-| 9 | Тело не JSON / без `Content-Type` | `VALIDATION_ERROR` (`400` / `415`) |
+| 9 | Тело не JSON / без `Content-Type` | `VALIDATION_ERROR` в конверте `error` (осознанное отклонение от `400`/`415` SPEC — единый формат важнее кода, см. ASSUMPTIONS) |
 | 10 | Отсутствующее/пустое/пробельное обязательное поле | `VALIDATION_ERROR`, `details` называет поле в нотации запроса |
 | 11 | Граничный валидный запрос | `201` + строка реально сохранена, `GET /quotes/{id}` её отдаёт |
 | 12 | Котировка старше `quote_ttl_sec` | `QUOTE_EXPIRED`; неизвестный id → `QUOTE_NOT_FOUND` |

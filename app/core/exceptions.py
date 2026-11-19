@@ -75,9 +75,19 @@ class ServiceUnavailableError(DomainError):
     status = 503
 
 
-class ProviderUnavailableError(DomainError):
-    code = "PROVIDER_UNAVAILABLE"
-    status = 502
+class ClientNotFoundError(DomainError):
+    code = "CLIENT_NOT_FOUND"
+    status = 404
+
+
+class NotFoundError(DomainError):
+    code = "NOT_FOUND"
+    status = 404
+
+
+class MethodNotAllowedError(DomainError):
+    code = "METHOD_NOT_ALLOWED"
+    status = 405
 
 
 class TransferNotFoundError(DomainError):

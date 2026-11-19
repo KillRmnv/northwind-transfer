@@ -149,6 +149,19 @@ def test_target_source_roundtrip(now: datetime) -> None:
         assert there.target_amount == first.target_amount
 
 
+@pytest.mark.parametrize("source_amount", ["1000.00", "300000.00"])
+def test_target_source_roundtrip_at_limits(source_amount: str, now: datetime) -> None:
+    direction = tariff("RU-TH-BANK")
+    rates = load_rates(now)
+    rate = service.resolve_rate(rates, "RUB", "THB", now, 10**9, MINOR)
+    first = service.calculate_source(Decimal(source_amount), direction, rate, MINOR)
+    there = service.calculate_target(first.target_amount, direction, rate, MINOR)
+    with check:
+        assert there.target_amount >= first.target_amount
+    with check:
+        assert there.source_amount >= first.source_amount
+
+
 @pytest.mark.parametrize(
     ("amount", "code"),
     [
