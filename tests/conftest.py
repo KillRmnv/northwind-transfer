@@ -67,6 +67,17 @@ async def engine() -> AsyncIterator:
 
 @pytest.fixture()
 async def session(engine) -> AsyncIterator[AsyncSession]:
+    from sqlalchemy import text
+
+    async with engine.connect() as cleanup:
+        if cleanup.dialect.name != "sqlite":
+            await cleanup.execute(
+                text(
+                    "select pg_terminate_backend(pid) from pg_stat_activity "
+                    "where datname = current_database() and pid <> pg_backend_pid()"
+                )
+            )
+            await cleanup.commit()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)

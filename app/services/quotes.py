@@ -176,23 +176,24 @@ def calculate_target(
     quantum_src = Decimal("1") if minor_units[src] == 0 else Decimal("1." + "0" * minor_units[src])
     if charged_in_source:
         to_convert_exact = amount / rate
-        fee_min_q = _quant(tariff.fee_min, src, minor_units)
         percent_candidate = (
             (to_convert_exact + tariff.fee_fixed)
             / (Decimal("1") - tariff.fee_percent / Decimal("100"))
         ).quantize(quantum_src, rounding=ROUND_CEILING)
-        profit_candidate = percent_candidate
-        forward = calculate_source(profit_candidate, tariff, rate, minor_units)
-        if forward.fee_amount < fee_min_q:
-            profit_candidate = (to_convert_exact + tariff.fee_min).quantize(
+        raw_fee = percent_candidate * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
+        source = percent_candidate
+        if raw_fee < tariff.fee_min:
+            source = (to_convert_exact + tariff.fee_min).quantize(
                 quantum_src, rounding=ROUND_CEILING
             )
-            forward = calculate_source(profit_candidate, tariff, rate, minor_units)
-            if forward.fee_amount < fee_min_q:
-                profit_candidate = (to_convert_exact + fee_min_q).quantize(
-                    quantum_src, rounding=ROUND_CEILING
-                )
-                forward = calculate_source(profit_candidate, tariff, rate, minor_units)
+        forward = calculate_source(source, tariff, rate, minor_units)
+        for _ in range(10):
+            if forward.target_amount >= amount:
+                break
+            source = (Decimal(forward.source_amount) + quantum_src).quantize(
+                quantum_src, rounding=ROUND_CEILING
+            )
+            forward = calculate_source(source, tariff, rate, minor_units)
         return QuoteResult(
             direction_id=forward.direction_id,
             source_amount=forward.source_amount,
@@ -205,27 +206,22 @@ def calculate_target(
             target_currency=forward.target_currency,
             breakdown=breakdown + forward.breakdown,
         )
-    fee_min_q = _quant(tariff.fee_min, tgt, minor_units)
     percent_gross = (amount + tariff.fee_fixed) / (
         Decimal("1") - tariff.fee_percent / Decimal("100")
     )
     percent_source = (percent_gross / rate).quantize(quantum_src, rounding=ROUND_CEILING)
-    forward = calculate_source(percent_source, tariff, rate, minor_units)
-    if forward.fee_amount < fee_min_q:
-        min_source = ((amount + fee_min_q) / rate).quantize(quantum_src, rounding=ROUND_CEILING)
-        forward = calculate_source(min_source, tariff, rate, minor_units)
-    return QuoteResult(
-        direction_id=forward.direction_id,
-        source_amount=forward.source_amount,
-        source_currency=forward.source_currency,
-        fee_amount=forward.fee_amount,
-        fee_currency=forward.fee_currency,
-        amount_to_convert=forward.amount_to_convert,
-        rate=forward.rate,
-        target_amount=forward.target_amount,
-        target_currency=forward.target_currency,
-        breakdown=breakdown + forward.breakdown,
-    )
+    raw_gross_fee = percent_gross * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
+    source = percent_source
+    if raw_gross_fee < tariff.fee_min:
+        source = ((amount + tariff.fee_min) / rate).quantize(quantum_src, rounding=ROUND_CEILING)
+    forward = calculate_source(source, tariff, rate, minor_units)
+    for _ in range(10):
+        if forward.target_amount >= amount:
+            break
+        source = (Decimal(forward.source_amount) + quantum_src).quantize(
+            quantum_src, rounding=ROUND_CEILING
+        )
+        forward = calculate_source(source, tariff, rate, minor_units)
     return QuoteResult(
         direction_id=forward.direction_id,
         source_amount=forward.source_amount,

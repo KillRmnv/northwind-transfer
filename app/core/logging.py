@@ -21,15 +21,22 @@ SECRET_KEYS = (
     "signature",
     "cookie",
     "private_key",
+    "access_token",
+    "client_secret",
+    "session_id",
 )
 
 PATTERNS = [
     re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=\-]+"),
     re.compile(
-        r"(?i)\b(password|passwd|secret|token|api[_-]?key|signature)\b\s*[=:]\s*[^\s,;&\"'}]+"
+        r"(?i)\b(password|passwd|secret|token|api[_-]?key|signature|access_token|client_secret|session_id|x-api-key)\b\s*[=:]\s*[^\s,;&\"'}]+"
     ),
     re.compile(
-        r"(?i)([\"']?(?:password|passwd|secret|token|api[_-]?key|authorization|x-signature)[\"']?\s*:\s*[\"'])([^\"']+)"
+        r"(?i)([\"']?(?:password|passwd|secret|token|api[_-]?key|authorization|x-signature|access_token|client_secret|session_id)[\"']?\s*:\s*[\"'])([^\"']+)"
+    ),
+    re.compile(r"(?i)(://[^:/\s]+:)[^@/\s]+(@)"),
+    re.compile(
+        r"(?i)\b(access_token|client_secret|session_id|x-api-key)\s*[=:]\s*[\"']([^\"']+)[\"']"
     ),
 ]
 
@@ -39,6 +46,8 @@ def redact_text(value: str) -> str:
     result = PATTERNS[0].sub(lambda m: f"{m.group(1)} {MASK}", result)
     result = PATTERNS[1].sub(lambda m: f"{m.group(1)}={MASK}", result)
     result = PATTERNS[2].sub(lambda m: f"{m.group(1)}{MASK}", result)
+    result = PATTERNS[3].sub(lambda m: f"{m.group(1)}{MASK}{m.group(2)}", result)
+    result = PATTERNS[4].sub(lambda m: f"{m.group(1)}={MASK}", result)
     return result
 
 
@@ -56,8 +65,13 @@ def redact_value(value):
 
 
 def _is_secret_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(marker in lowered for marker in SECRET_KEYS)
+    parts = [part for part in re.split(r"[^a-z0-9]+", key.lower()) if part]
+    for marker in SECRET_KEYS:
+        wanted = [part for part in re.split(r"[^a-z0-9]+", marker) if part]
+        for index in range(len(parts) - len(wanted) + 1):
+            if parts[index : index + len(wanted)] == wanted:
+                return True
+    return "api" in parts and "key" in parts
 
 
 class RedactingFilter(logging.Filter):

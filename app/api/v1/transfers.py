@@ -56,6 +56,9 @@ async def create_transfer(
 ) -> TransferResponse:
     if not idempotency_key:
         raise ValidationError("Idempotency-Key header is required")
+    idempotency_key = idempotency_key.strip()
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
     try:
         quote_uuid = UUID(request.quote_id)
     except ValueError as exc:

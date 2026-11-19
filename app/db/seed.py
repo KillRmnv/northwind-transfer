@@ -26,7 +26,7 @@ from app.models.tables import (
 
 TRANSFER_STATUSES = ["PENDING", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"]
 ATTEMPT_STATUSES = ["PROCESSING", "COMPLETED", "FAILED"]
-LIMIT_PERIOD_TYPES = ["HOURLY", "DAILY", "WINDOW_N"]
+LIMIT_PERIOD_TYPES = ["MINUTES", "HOURLY", "DAILY", "WINDOW_N"]
 
 
 def parse_time(value: str) -> datetime:

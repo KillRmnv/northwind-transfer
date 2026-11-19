@@ -24,6 +24,15 @@ async def get_transfer(
     return (await session.execute(query)).scalar_one_or_none()
 
 
+async def lock_client(session: AsyncSession, client_id: str):
+    from app.models.tables import Client
+
+    query = sa.select(Client).where(Client.client_id == client_id)
+    if session.bind and session.bind.dialect.name != "sqlite":
+        query = query.with_for_update()
+    return (await session.execute(query)).scalar_one_or_none()
+
+
 async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Transfer | None:
     try:
         transfer_id = uuid.UUID(reference)

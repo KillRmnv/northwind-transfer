@@ -115,3 +115,11 @@ def test_stale_direct_rate_does_not_fall_back_to_cross() -> None:
     }
     with pytest.raises(exceptions.RateUnavailableError):
         service.resolve_rate(rates, "RUB", "PHP", now, 900, MINOR)
+
+
+def test_target_with_min_fee_does_not_underpay_small_amount() -> None:
+    result = service.calculate_target(Decimal("420.00"), tariff(), RATES[("RUB", "THB")], MINOR)
+    with check:
+        assert result.target_amount >= Decimal("420.00")
+    with check:
+        assert result.fee_amount == Decimal("50.00")

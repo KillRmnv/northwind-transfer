@@ -101,12 +101,21 @@ async def check_limit_definitions(
     for definition in rows:
         if definition.scope == "direction" and definition.direction_id != tariff_direction_id:
             continue
-        if definition.period_type == "HOURLY":
+        if definition.scope == "category":
+            continue
+        weight = Decimal(definition.weight)
+        if weight <= 0:
+            weight = Decimal("1")
+        if definition.period_type == "MINUTES":
+            window_start = now - timedelta(minutes=int(definition.window_days or 1))
+        elif definition.period_type == "HOURLY":
             window_start = now - timedelta(hours=1)
         elif definition.period_type == "DAILY":
             window_start, _ = day_bounds(now)
         elif definition.period_type == "WINDOW_N":
-            window_start = now - timedelta(days=int(definition.window_days or 0))
+            if not definition.window_days or int(definition.window_days) <= 0:
+                continue
+            window_start = now - timedelta(days=int(definition.window_days))
         else:
             continue
         entries = await sum_window_source(
@@ -121,13 +130,13 @@ async def check_limit_definitions(
                 amount, currency, definition.currency, rate, currency, target_currency
             )
             if converted is not None:
-                total += converted * Decimal(definition.weight)
+                total += converted * weight
         live_rate = live_rates.get((source_currency, definition.currency))
         addition = await to_limit_currency(
             source_amount,
             source_currency,
             definition.currency,
-            live_rate.rate if live_rate is not None else None,
+            _rate_value(live_rate),
             source_currency,
             definition.currency,
         )
@@ -137,11 +146,17 @@ async def check_limit_definitions(
             )
         if addition is None:
             continue
-        if total + addition * Decimal(definition.weight) > Decimal(definition.amount):
+        if total + addition * weight > Decimal(definition.amount):
             raise DailyLimitExceededError(
                 f"limit {definition.scope}/{definition.period_type} exceeded for {client_id}",
                 details={"limit": str(definition.amount)},
             )
+
+
+def _rate_value(rate) -> Decimal | None:
+    if rate is None:
+        return None
+    return rate.rate if hasattr(rate, "rate") else rate
 
 
 def convert_via_rates(
@@ -150,15 +165,6 @@ def convert_via_rates(
     target_currency: str,
     live_rates: dict[tuple[str, str], Decimal],
 ) -> Decimal | None:
-    if amount_currency == target_currency:
-        return amount
-    direct = live_rates.get((amount_currency, target_currency))
-    if direct is not None:
-        value = direct.rate if hasattr(direct, "rate") else direct
-        return amount * value
-    inverse = live_rates.get((target_currency, amount_currency))
-    if inverse is not None:
-        value = inverse.rate if hasattr(inverse, "rate") else inverse
-        if value != 0:
-            return amount / value
-    return None
+    from app.services.providers import convert_amount
+
+    return convert_amount(amount, amount_currency, target_currency, live_rates)

@@ -41,7 +41,7 @@ def convert_amount(
         return amount
     graph: dict[str, list[tuple[str, Decimal]]] = {}
     for (base, quote), rate in rates.items():
-        if rate == 0:
+        if not rate.is_finite() or rate <= 0:
             continue
         graph.setdefault(base, []).append((quote, rate))
         graph.setdefault(quote, []).append((base, Decimal("1") / rate))
@@ -70,7 +70,6 @@ def provider_fee_in_source(
     rates: dict[tuple[str, str], Decimal],
     minor_units: dict[str, int],
 ) -> Decimal | None:
-    from app.core.money import round_money
 
     amount_in_provider = convert_amount(target_amount, target_currency, provider.currency, rates)
     if amount_in_provider is None:
@@ -81,7 +80,7 @@ def provider_fee_in_source(
     converted = convert_amount(fee_in_provider, provider.currency, source_currency, rates)
     if converted is None:
         return None
-    return round_money(converted, minor_units[source_currency])
+    return converted
 
 
 def filter_limits(

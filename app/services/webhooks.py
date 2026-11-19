@@ -1,22 +1,22 @@
 import hashlib
 import hmac
+import json
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import now_utc
-from app.core.exceptions import (
-    ServiceUnavailableError,
-    UnauthorizedError,
-    ValidationError,
-)
+from app.core.exceptions import ServiceUnavailableError, UnauthorizedError, ValidationError
 from app.core.settings import Settings
-from app.models.tables import Provider
+from app.models.tables import Provider, WebhookEvent
 from app.repositories import transfers as transfer_repo
-from app.schemas.webhooks import WebhookEvent
+from app.schemas.webhooks import WebhookEvent as WebhookEventSchema
 from app.services import finalize as finalize_mod
 from app.services.providers import ProviderClient
 from app.services.transfers import TERMINAL, run_attempts
+
+PAYOUT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
@@ -48,55 +48,57 @@ async def handle_webhook(
         raise ServiceUnavailableError("webhook secret is not configured")
     if not verify_signature(settings.provider_webhook_secret, body, signature):
         raise UnauthorizedError("invalid webhook signature")
-    import json as json_module
-
     try:
-        payload = json_module.loads(body.decode())
+        payload = json.loads(body.decode())
     except (ValueError, UnicodeDecodeError) as exc:
         raise ValidationError("webhook body is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise ValidationError("webhook body must be an object")
     try:
-        event = WebhookEvent.model_validate(payload)
+        event = WebhookEventSchema.model_validate(payload)
         occurred_at = parse_time(event.occurred_at)
     except (ValueError, TypeError) as exc:
         raise ValidationError("webhook fields are invalid") from exc
-    existing = await session.get(
-        __import__("app.models.tables", fromlist=["WebhookEvent"]).WebhookEvent,
-        event.event_id,
-    )
-    if existing is not None:
+    if not PAYOUT_ID_RE.fullmatch(event.payout_id):
+        raise ValidationError("payout_id is invalid")
+    if await session.get(WebhookEvent, event.event_id) is not None:
         return
+    await transfer_repo.store_webhook_event(
+        session,
+        event.event_id,
+        provider_id,
+        event.payout_id,
+        event.reference,
+        event.status,
+        occurred_at,
+        now,
+    )
+    try:
+        await _process_event(session, settings, provider_id, event, occurred_at)
+    except Exception:
+        await session.rollback()
+        raise
+    await session.commit()
+
+
+async def _process_event(
+    session: AsyncSession,
+    settings: Settings,
+    provider_id: str,
+    event: WebhookEventSchema,
+    occurred_at: datetime,
+) -> None:
     transfer = await transfer_repo.get_transfer_by_reference(session, event.reference)
     if transfer is None:
-        await transfer_repo.store_webhook_event(
-            session,
-            event.event_id,
-            provider_id,
-            event.payout_id,
-            event.reference,
-            event.status,
-            occurred_at,
-            now,
-        )
-        await session.commit()
         return
     if transfer.status in TERMINAL:
-        await transfer_repo.store_webhook_event(
-            session,
-            event.event_id,
-            provider_id,
-            event.payout_id,
-            event.reference,
-            event.status,
-            occurred_at,
-            now,
-        )
-        await session.commit()
         return
     previous = await transfer_repo.webhook_events_for_transfer(session, event.reference)
-    newest = max((item.occurred_at for item in previous), default=None)
-    if newest is not None and occurred_at < newest:
+    newest = max(
+        (item.occurred_at for item in previous if item.event_id != event.event_id),
+        default=None,
+    )
+    if newest is not None and occurred_at <= newest:
         return
     attempt = await transfer_repo.find_attempt_by_payout(session, provider_id, event.payout_id)
     if attempt is not None and attempt.transfer_id != transfer.transfer_id:
@@ -113,18 +115,8 @@ async def handle_webhook(
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
         if locked is not None and locked.status not in TERMINAL:
             await finalize_mod.complete_transfer(session, settings, locked, now_utc())
-    elif event.status == "FAILED":
+        return
+    if event.status == "FAILED":
         if state is not None and state.status == "COMPLETED":
             return
         await run_attempts(session, settings, transfer.transfer_id, now_utc())
-    await transfer_repo.store_webhook_event(
-        session,
-        event.event_id,
-        provider_id,
-        event.payout_id,
-        event.reference,
-        event.status,
-        occurred_at,
-        now,
-    )
-    await session.commit()
