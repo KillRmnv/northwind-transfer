@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.types import FlexibleUUID
+
 
 class Recipient(BaseModel):
     model_config = ConfigDict(strict=True)
@@ -14,7 +16,7 @@ class Recipient(BaseModel):
 class TransferRequest(BaseModel):
     model_config = ConfigDict(strict=True)
 
-    quote_id: str = Field(min_length=36, max_length=36)
+    quote_id: FlexibleUUID
     client_id: str = Field(min_length=1, max_length=32)
     recipient: Recipient
 

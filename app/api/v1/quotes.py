@@ -1,8 +1,6 @@
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,10 +9,10 @@ from app.core.clock import as_utc, now_utc
 from app.core.exceptions import (
     QuoteExpiredError,
     QuoteNotFoundError,
-    RateUnavailableError,
     ValidationError,
 )
 from app.core.money import amount_string_is_valid
+from app.core.parse import parse_decimal
 from app.core.settings import settings
 from app.db.engine import get_session
 from app.repositories.quotes import get_quote as load_quote
@@ -73,18 +71,12 @@ async def create_quote(
         raise ValidationError(
             f"amount must be a string with {minor_units[amount_currency]} decimals"
         )
-    try:
-        amount = Decimal(request.amount)
-    except InvalidOperation as exc:
-        raise ValidationError("amount is not a number") from exc
+    amount = parse_decimal(request.amount, "amount")
     if amount <= 0:
         raise ValidationError("amount must be positive")
-    try:
-        rates = await RatesClient(
-            settings.mock_provider_url, settings.mock_provider_timeout_sec
-        ).fetch()
-    except httpx.HTTPError as exc:
-        raise RateUnavailableError(f"cannot fetch rates: {exc}") from exc
+    rates = await RatesClient(
+        settings.mock_provider_url, settings.mock_provider_timeout_sec
+    ).fetch()
     rate = resolve_rate(
         rates, source_currency, target_currency, now, tariff.quote_ttl_sec, minor_units
     )

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import httpx
 
+from app.core.http_client import get_json
 from app.core.types import (
     Accepted,
     CreateOutcome,
@@ -161,42 +162,40 @@ class ProviderClient:
             "recipient": recipient,
             "callback_url": callback_url,
         }
-        try:
-            async with self._client() as client:
-                response = await client.post(
-                    f"{self._base_url}/{provider_id}/payouts", json=body, headers=headers
-                )
-        except (httpx.TransportError, httpx.TimeoutException):
+        async with self._client() as client:
+            status_code, payload = await get_json(
+                client,
+                "POST",
+                f"{self._base_url}/{provider_id}/payouts",
+                json=body,
+                headers=headers,
+            )
+        if status_code is None:
             return UnknownResult(reason="transport error")
-        if response.status_code == 201:
-            payload = response.json()
+        if status_code == 201 and isinstance(payload, dict):
             return Accepted(
                 payout_id=payload["payout_id"], status=payload.get("status", "PROCESSING")
             )
-        if response.status_code == 422:
-            payload = response.json()
+        if status_code == 422 and isinstance(payload, dict):
             return Declined(failure_code=str(payload.get("code", "DECLINED")))
-        if response.status_code == 503:
+        if status_code == 503:
             return Declined(failure_code="PROVIDER_UNAVAILABLE")
-        if 500 <= response.status_code < 600:
-            return UnknownResult(reason=f"http {response.status_code}")
-        try:
-            payload = response.json()
-        except ValueError:
-            return UnknownResult(reason=f"http {response.status_code}")
-        if response.status_code == 409:
+        if status_code is not None and 500 <= status_code < 600:
+            return UnknownResult(reason=f"http {status_code}")
+        if status_code == 409:
             return UnknownResult(reason="idempotency conflict at provider")
-        return UnknownResult(reason=str(payload.get("code", f"http {response.status_code}")))
+        if isinstance(payload, dict):
+            return UnknownResult(reason=str(payload.get("code", f"http {status_code}")))
+        return UnknownResult(reason=f"http {status_code}")
 
     async def get_payout(self, provider_id: str, payout_id: str) -> PayoutState | None:
-        try:
-            async with self._client() as client:
-                response = await client.get(f"{self._base_url}/{provider_id}/payouts/{payout_id}")
-        except (httpx.TransportError, httpx.TimeoutException):
+        async with self._client() as client:
+            status_code, payload = await get_json(
+                client, "GET", f"{self._base_url}/{provider_id}/payouts/{payout_id}"
+            )
+        if status_code != 200 or not isinstance(payload, dict):
             return None
-        if response.status_code != 200:
-            return None
-        return _parse_state(response.json())
+        return _parse_state(payload)
 
     async def find_payout(self, provider_id: str, reference: str) -> PayoutState | None:
         outcome, state = await self.probe_payout(provider_id, reference)
@@ -205,19 +204,20 @@ class ProviderClient:
     async def probe_payout(
         self, provider_id: str, reference: str
     ) -> tuple[str, PayoutState | None]:
-        try:
-            async with self._client() as client:
-                response = await client.get(
-                    f"{self._base_url}/{provider_id}/payouts",
-                    params={"reference": reference},
-                )
-        except (httpx.TransportError, httpx.TimeoutException):
+        async with self._client() as client:
+            status_code, payload = await get_json(
+                client,
+                "GET",
+                f"{self._base_url}/{provider_id}/payouts",
+                params={"reference": reference},
+            )
+        if status_code is None:
             return "error", None
-        if response.status_code == 404:
+        if status_code == 404:
             return "missing", None
-        if response.status_code != 200:
+        if status_code != 200 or not isinstance(payload, dict):
             return "error", None
-        return "found", _parse_state(response.json())
+        return "found", _parse_state(payload)
 
 
 def _parse_state(payload: dict) -> PayoutState:

@@ -3,11 +3,11 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import as_utc, now_utc
 from app.core.exceptions import (
+    IdempotencyConflictError,
     InsufficientFundsError,
     QuoteExpiredError,
     QuoteNotFoundError,
@@ -177,8 +177,6 @@ async def create_transfer(
     existing = await transfer_repo.get_by_idempotency_key(session, idempotency_key)
     if existing is not None:
         if existing.idempotency_hash != digest:
-            from app.core.exceptions import IdempotencyConflictError
-
             raise IdempotencyConflictError(idempotency_key)
         return existing, False
     client = await transfer_repo.lock_client(session, client_id)
@@ -228,22 +226,13 @@ async def create_transfer(
         now,
     )
     await balance_repo.reserve(session, client_id, source_currency, source_amount)
-    try:
-        transfer = await transfer_repo.create_transfer(
-            session, quote, client_id, recipient, idempotency_key, digest, now
-        )
-        await session.commit()
-    except IntegrityError:
-        await session.rollback()
-        winner = await transfer_repo.get_by_idempotency_key(session, idempotency_key)
-        if winner is None:
-            raise
-        if winner.idempotency_hash != digest:
-            from app.core.exceptions import IdempotencyConflictError
-
-            raise IdempotencyConflictError(idempotency_key) from None
-        return winner, False
-    return transfer, True
+    transfer, created = await transfer_repo.create_transfer_or_existing(
+        session, quote, client_id, recipient, idempotency_key, digest, now
+    )
+    if not created:
+        await balance_repo.release_reserve(session, client_id, source_currency, source_amount)
+    await session.commit()
+    return transfer, created
 
 
 async def run_attempts(

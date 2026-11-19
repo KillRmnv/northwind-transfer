@@ -229,3 +229,17 @@ Chaos 300 поймал редкую гонку: `wait_for_settlement` по ис�
 Финальный прогон: **300 переводов, `RESULT: OK`** — 275 `COMPLETED`, 25 `FAILED`, 38 двойных сабмитов, 0 двойных выплат, 0 зависших резервов и переводов, 0 расхождений баланса, 0 ошибок API.
 
 Путь до зелёного: 9 двойных выплат → 15/3 зависших `PROCESSING` → отрицательный `reserved` → 9 залипших после гонки статусов. Каждый шаг закрыт либо атомарной операцией (`funds_settled` + статус одним UPDATE), либо правилом (`GET ?reference=` при неизвестном итоге, подтверждение `COMPLETED` через провайдера, детерминированный ключ идемпотентности), либо тестом-регрессией.
+
+## D25. Исключения без try/except в бизнес-логике
+
+В `app/services/` и `app/api/` нет ни одного `try/except` — как Java `RuntimeException` + `@ControllerAdvice`: кидаем доменные исключения где угодно, переводит и рендерит их только advice-слой (`app/api/exception_handlers.py` → RFC 9457 + `error`). Контроль — arch-тестом `test_no_try_except_in_services_and_api`.
+
+Перевод технических исключений в доменные живёт исключительно на инфраструктурных границах:
+- парсинг (`Decimal`, `UUID`) — `app/core/parse.py`;
+- HTTP-транспорт — `app/core/http_client.py::get_json` (возвращает `(статус, тело)` вместо бросков);
+- гонка идемпотентности — `repositories/transfers.py::create_transfer_or_existing` (аналог Spring `@Repository exception translation`);
+- валидация тел — Pydantic (`FlexibleUUID`, валидаторы схем, `TypeAdapter` для вебхуков) + хендлеры `RequestValidationError`/`pydantic.ValidationError` → 422.
+
+Валидные `try` остались только там, где это управление потоком верхнего уровня, а не обработка: сторож фоновой сверки и log-and-reraise в middleware (`app/main.py`), `session.begin_nested()` в репозитории.
+
+Причина: `try/except` посреди бизнес-логики делает код нечитаемым и прячет контракт ошибок. Единое место перевода + единый рендер дают тот же эффект, что связка unchecked-исключений и `@ControllerAdvice` в Spring.

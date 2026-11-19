@@ -44,6 +44,19 @@ def test_models_do_not_import_outer_layers() -> None:
     assert offenders == []
 
 
+def test_no_try_except_in_services_and_api() -> None:
+    from pathlib import Path
+
+    offenders = []
+    for base in (Path("app/services"), Path("app/api")):
+        for path in base.rglob("*.py"):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped == "try:" or stripped.startswith("except"):
+                    offenders.append(f"{path}:{number}: {stripped}")
+    assert offenders == []
+
+
 def test_no_comments_in_application_code() -> None:
     from pathlib import Path
 

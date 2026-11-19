@@ -1,12 +1,12 @@
 import hashlib
 import hmac
-import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.clock import now_utc
+from app.core.clock import as_utc, now_utc
 from app.core.exceptions import ServiceUnavailableError, UnauthorizedError, ValidationError
 from app.core.settings import Settings
 from app.models.tables import Provider, WebhookEvent
@@ -18,19 +18,14 @@ from app.services.transfers import TERMINAL, run_attempts
 
 PAYOUT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+EVENT_ADAPTER: TypeAdapter[WebhookEventSchema] = TypeAdapter(WebhookEventSchema)
+
 
 def verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
     if not signature:
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
-
-
-def parse_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 async def handle_webhook(
@@ -48,17 +43,8 @@ async def handle_webhook(
         raise ServiceUnavailableError("webhook secret is not configured")
     if not verify_signature(settings.provider_webhook_secret, body, signature):
         raise UnauthorizedError("invalid webhook signature")
-    try:
-        payload = json.loads(body.decode())
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ValidationError("webhook body is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValidationError("webhook body must be an object")
-    try:
-        event = WebhookEventSchema.model_validate(payload)
-        occurred_at = parse_time(event.occurred_at)
-    except (ValueError, TypeError) as exc:
-        raise ValidationError("webhook fields are invalid") from exc
+    event = EVENT_ADAPTER.validate_json(body)
+    occurred_at = as_utc(event.occurred_at)
     if not PAYOUT_ID_RE.fullmatch(event.payout_id):
         raise ValidationError("payout_id is invalid")
     if event.status not in {"PROCESSING", "COMPLETED", "FAILED"}:
@@ -75,11 +61,7 @@ async def handle_webhook(
         occurred_at,
         now,
     )
-    try:
-        await _process_event(session, settings, provider_id, event, occurred_at)
-    except Exception:
-        await session.rollback()
-        raise
+    await _process_event(session, settings, provider_id, event, occurred_at)
     await session.commit()
 
 
@@ -97,7 +79,7 @@ async def _process_event(
         return
     previous = await transfer_repo.webhook_events_for_transfer(session, event.reference)
     newest = max(
-        (item.occurred_at for item in previous if item.event_id != event.event_id),
+        (as_utc(item.occurred_at) for item in previous if item.event_id != event.event_id),
         default=None,
     )
     if newest is not None and occurred_at <= newest:

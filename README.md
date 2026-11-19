@@ -38,7 +38,6 @@ uv run uvicorn app.main:app --port 8080
 uv run pytest
 docker compose run --rm api uv run pytest
 ```
-
 Тесты работают на реальном PostgreSQL в отдельной базе `transfer_test` (создаётся автоматически). Dev-база `transfer` тестами не затрагивается. Переопределить базу — `TEST_DATABASE_URL`. SQLite-профиль доступен для быстрых локальных прогонов, но не проверяет блокировки и конкурентность.
 
 Нагрузка и хаос:
@@ -49,6 +48,13 @@ uv run python scripts/chaos_run.py --transfers 60 --api http://localhost:8080 \
 ```
 
 Ожидаемый результат — `RESULT: OK`: ноль двойных выплат, зависших резервов и расхождений с ledger провайдера.
+
+Если хост не видит опубликованные порты (`pg_isready -h localhost -p 5433` молчит при healthy-контейнерах) — обычно виноват VPN на хосте, режущий host→container трафик. Варианты: отключить VPN на время прогона либо запускать тесты изнутри compose-сети, где container→container ходит напрямую:
+
+```sh
+docker compose run --rm -e DB_HOST=db -e DB_PORT=5432 --entrypoint sh api \
+  -c "cd /app && uv sync --frozen && uv run --frozen pytest -q"
+```
 
 ## Профили БД
 

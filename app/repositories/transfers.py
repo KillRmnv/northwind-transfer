@@ -4,8 +4,10 @@ from datetime import datetime
 from decimal import Decimal
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import IdempotencyConflictError
 from app.models.tables import PayoutAttempt, Quote, Transfer, WebhookEvent
 from app.repositories.balances import for_update
 
@@ -44,6 +46,46 @@ async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Tr
 async def get_by_idempotency_key(session: AsyncSession, key: str) -> Transfer | None:
     query = sa.select(Transfer).where(Transfer.idempotency_key == key)
     return (await session.execute(query)).scalar_one_or_none()
+
+
+async def create_transfer_or_existing(
+    session: AsyncSession,
+    quote: Quote,
+    client_id: str,
+    recipient: dict,
+    idempotency_key: str,
+    idempotency_hash: str,
+    now: datetime,
+) -> tuple[Transfer, bool]:
+    try:
+        async with session.begin_nested():
+            row = Transfer(
+                transfer_id=uuid.uuid4(),
+                quote_id=quote.quote_id,
+                client_id=client_id,
+                status="PENDING",
+                source_amount=quote.source_amount,
+                source_currency=quote.source_currency,
+                target_amount=quote.target_amount,
+                target_currency=quote.target_currency,
+                recipient_name=recipient.get("name", ""),
+                recipient_account=recipient["account"],
+                recipient_bank=recipient.get("bank_code", ""),
+                idempotency_key=idempotency_key,
+                idempotency_hash=idempotency_hash,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+        return row, True
+    except IntegrityError as exc:
+        winner = await get_by_idempotency_key(session, idempotency_key)
+        if winner is None:
+            raise
+        if winner.idempotency_hash != idempotency_hash:
+            raise IdempotencyConflictError(idempotency_key) from exc
+        return winner, False
 
 
 async def create_transfer(

@@ -1,6 +1,7 @@
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError as PydanticValidationError
 
 from app.core.exceptions import DomainError, ValidationError
 
@@ -25,6 +26,15 @@ async def domain_error_handler(request: Request, exc: DomainError) -> JSONRespon
 
 
 async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    details = {".".join(str(part) for part in error["loc"]): error["msg"] for error in exc.errors()}
+    return await domain_error_handler(
+        request, ValidationError("request validation failed", details=details)
+    )
+
+
+async def pydantic_validation_handler(
+    request: Request, exc: PydanticValidationError
+) -> JSONResponse:
     details = {".".join(str(part) for part in error["loc"]): error["msg"] for error in exc.errors()}
     return await domain_error_handler(
         request, ValidationError("request validation failed", details=details)

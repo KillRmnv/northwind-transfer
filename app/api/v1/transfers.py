@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mappers import balances_to_response, transfer_to_response
 from app.core.clock import now_utc
-from app.core.exceptions import DomainError, TransferNotFoundError, ValidationError
+from app.core.exceptions import TransferNotFoundError, ValidationError
 from app.core.settings import settings
 from app.db.engine import get_session
 from app.models.tables import Client
@@ -25,10 +25,7 @@ async def build_history(session: AsyncSession, transfer) -> list[tuple]:
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     for attempt in attempts:
         items.append((attempt.status, attempt.created_at, f"provider:{attempt.provider_id}"))
-    try:
-        events = await transfer_repo.webhook_events_for_transfer(session, transfer.transfer_id.hex)
-    except DomainError:
-        events = []
+    events = await transfer_repo.webhook_events_for_transfer(session, transfer.transfer_id.hex)
     for event in events:
         items.append((event.status, event.received_at, f"provider:{event.provider_id}"))
     items.append((transfer.status, transfer.updated_at, "service"))
@@ -61,15 +58,11 @@ async def create_transfer(
     idempotency_key = idempotency_key.strip()
     if not idempotency_key or len(idempotency_key) > 128:
         raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
-    try:
-        quote_uuid = UUID(request.quote_id)
-    except ValueError as exc:
-        raise ValidationError("quote_id must be a UUID") from exc
     now = now_utc()
     transfer, _ = await transfer_service.create_transfer(
         session,
         settings,
-        quote_uuid,
+        request.quote_id,
         request.client_id,
         request.recipient.model_dump(),
         idempotency_key,

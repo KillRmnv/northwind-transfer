@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from app.api.exception_handlers import (
     domain_error_handler,
+    pydantic_validation_handler,
     request_validation_handler,
     unhandled_error_handler,
 )
@@ -77,6 +79,7 @@ def create_app() -> FastAPI:
     )
     app.add_exception_handler(DomainError, domain_error_handler)
     app.add_exception_handler(RequestValidationError, request_validation_handler)
+    app.add_exception_handler(PydanticValidationError, pydantic_validation_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)
 
     @app.middleware("http")

@@ -1,6 +1,10 @@
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from typing import Annotated, Any
+
+from pydantic import BeforeValidator
 
 
 @dataclass(frozen=True)
@@ -100,3 +104,12 @@ class PayoutState:
 
 
 CreateOutcome = Accepted | Declined | ServerError | UnknownResult
+
+
+def _coerce_uuid(value: Any) -> uuid.UUID:
+    if isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))
+
+
+FlexibleUUID = Annotated[uuid.UUID, BeforeValidator(_coerce_uuid)]
