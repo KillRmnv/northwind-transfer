@@ -7,8 +7,13 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mappers import quote_row_to_response, quote_to_response
-from app.core.clock import now_utc
-from app.core.exceptions import QuoteNotFoundError, RateUnavailableError, ValidationError
+from app.core.clock import as_utc, now_utc
+from app.core.exceptions import (
+    QuoteExpiredError,
+    QuoteNotFoundError,
+    RateUnavailableError,
+    ValidationError,
+)
 from app.core.money import amount_string_is_valid
 from app.core.settings import settings
 from app.db.engine import get_session
@@ -83,13 +88,15 @@ async def create_quote(
     rate = resolve_rate(
         rates, source_currency, target_currency, now, tariff.quote_ttl_sec, minor_units
     )
-    check_limits(
-        amount_in_limit_currency(amount, amount_currency, tariff, rate), tariff, minor_units
-    )
     if request.amount_type == "SOURCE":
         result = calculate_source(amount, tariff, rate, minor_units)
     else:
         result = calculate_target(amount, tariff, rate, minor_units)
+    check_limits(
+        amount_in_limit_currency(result.source_amount, tariff.source_currency, tariff, rate),
+        tariff,
+        minor_units,
+    )
     expires_at = now + timedelta(seconds=tariff.quote_ttl_sec)
     quote_id = await save_quote(session, result, expires_at, now)
     response.headers["Location"] = f"/quotes/{quote_id}"
@@ -109,5 +116,7 @@ async def read_quote(quote_id: UUID, session: AsyncSession = Depends(get_session
     row = await load_quote(session, quote_id)
     if row is None:
         raise QuoteNotFoundError(str(quote_id))
+    if as_utc(row.expires_at) <= now_utc():
+        raise QuoteExpiredError(str(quote_id))
     minor_units = await load_minor_units(session)
     return quote_row_to_response(row, minor_units)

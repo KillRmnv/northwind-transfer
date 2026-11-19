@@ -327,3 +327,20 @@ async def test_daily_limit_exceeded(api, freeze_rates, live_rates, monkeypatch) 
         assert second.status_code == 409
     with check:
         assert second.json()["error"]["code"] == "DAILY_LIMIT_EXCEEDED"
+
+
+async def test_too_long_idempotency_key_rejected(api, freeze_rates, live_rates) -> None:
+    quote = await make_quote(api, freeze_rates, live_rates)
+    response = await api.post(
+        "/transfers",
+        json={
+            "quote_id": quote["quote_id"],
+            "client_id": "c_001",
+            "recipient": {"name": "N", "account": "123", "bank_code": "B"},
+        },
+        headers={"Idempotency-Key": "x" * 129},
+    )
+    with check:
+        assert response.status_code == 422
+    with check:
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"

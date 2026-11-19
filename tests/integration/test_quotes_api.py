@@ -137,3 +137,32 @@ async def test_request_id_header_present(api) -> None:
         assert response.status_code == 200
     with check:
         assert len(response.headers["x-request-id"]) == 16
+
+
+async def test_target_mode_obeys_source_max(api, freeze_rates, live_rates) -> None:
+    freeze_rates(live_rates)
+    response = await api.post(
+        "/quotes",
+        json=quote_payload(amount="126000.00", amount_type="TARGET"),
+    )
+    with check:
+        assert response.status_code == 400
+    with check:
+        assert response.json()["error"]["code"] == "AMOUNT_ABOVE_MAX"
+
+
+async def test_expired_quote_get_returns_410(api, freeze_rates, live_rates, monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.v1 import quotes as quotes_route
+
+    freeze_rates(live_rates)
+    created = await api.post("/quotes", json=quote_payload())
+    quote_id = created.json()["quote_id"]
+    future = datetime.now(timezone.utc) + timedelta(seconds=100000)
+    monkeypatch.setattr(quotes_route, "now_utc", lambda: future)
+    response = await api.get(f"/quotes/{quote_id}")
+    with check:
+        assert response.status_code == 410
+    with check:
+        assert response.json()["error"]["code"] == "QUOTE_EXPIRED"

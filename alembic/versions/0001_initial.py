@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from app.models.guid import GUID
 
 revision: str = "0001_initial"
@@ -45,10 +45,16 @@ def upgrade() -> None:
         "directions",
         sa.Column("direction_id", sa.String(32), primary_key=True),
         sa.Column("source_country", sa.String(2), sa.ForeignKey("countries.code"), nullable=False),
-        sa.Column("source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
+        sa.Column(
+            "source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
         sa.Column("target_country", sa.String(2), sa.ForeignKey("countries.code"), nullable=False),
-        sa.Column("target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
-        sa.Column("payout_method", sa.String(32), sa.ForeignKey("payout_methods.code"), nullable=False),
+        sa.Column(
+            "target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
+        sa.Column(
+            "payout_method", sa.String(32), sa.ForeignKey("payout_methods.code"), nullable=False
+        ),
         sa.Column("fee_percent", sa.Numeric(8, 5), nullable=False),
         sa.Column("fee_fixed", MONEY, nullable=False),
         sa.Column("fee_min", MONEY, nullable=False),
@@ -73,21 +79,30 @@ def upgrade() -> None:
     )
     op.create_table(
         "provider_directions",
-        sa.Column("provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), primary_key=True),
-        sa.Column("direction_id", sa.String(32), sa.ForeignKey("directions.direction_id"), primary_key=True),
+        sa.Column(
+            "provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), primary_key=True
+        ),
+        sa.Column(
+            "direction_id",
+            sa.String(32),
+            sa.ForeignKey("directions.direction_id"),
+            primary_key=True,
+        ),
     )
-    op.create_index(
-        "ix_provider_directions_direction", "provider_directions", ["direction_id"]
-    )
+    op.create_index("ix_provider_directions_direction", "provider_directions", ["direction_id"])
     op.create_table(
         "maintenance_windows",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False),
+        sa.Column(
+            "provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False
+        ),
         sa.Column("from_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("to_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index(
-        "ix_maintenance_windows_provider", "maintenance_windows", ["provider_id", "from_at", "to_at"]
+        "ix_maintenance_windows_provider",
+        "maintenance_windows",
+        ["provider_id", "from_at", "to_at"],
     )
     op.create_table(
         "clients",
@@ -107,15 +122,21 @@ def upgrade() -> None:
     op.create_table(
         "quotes",
         sa.Column("quote_id", GUID(), primary_key=True),
-        sa.Column("direction_id", sa.String(32), sa.ForeignKey("directions.direction_id"), nullable=False),
+        sa.Column(
+            "direction_id", sa.String(32), sa.ForeignKey("directions.direction_id"), nullable=False
+        ),
         sa.Column("source_amount", MONEY, nullable=False),
-        sa.Column("source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
+        sa.Column(
+            "source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
         sa.Column("fee_amount", MONEY, nullable=False),
         sa.Column("fee_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
         sa.Column("amount_to_convert", MONEY, nullable=False),
         sa.Column("rate", sa.Numeric(20, 8), nullable=False),
         sa.Column("target_amount", MONEY, nullable=False),
-        sa.Column("target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
+        sa.Column(
+            "target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
@@ -127,9 +148,13 @@ def upgrade() -> None:
         sa.Column("client_id", sa.String(32), sa.ForeignKey("clients.client_id"), nullable=False),
         sa.Column("status", sa.String(24), sa.ForeignKey("transfer_statuses.code"), nullable=False),
         sa.Column("source_amount", MONEY, nullable=False),
-        sa.Column("source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
+        sa.Column(
+            "source_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
         sa.Column("target_amount", MONEY, nullable=False),
-        sa.Column("target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
+        sa.Column(
+            "target_currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False
+        ),
         sa.Column("recipient_name", sa.String(255), nullable=False),
         sa.Column("recipient_account", sa.String(64), nullable=False),
         sa.Column("recipient_bank", sa.String(32), nullable=False, server_default=""),
@@ -144,7 +169,9 @@ def upgrade() -> None:
         "payout_attempts",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("transfer_id", GUID(), sa.ForeignKey("transfers.transfer_id"), nullable=False),
-        sa.Column("provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False),
+        sa.Column(
+            "provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False
+        ),
         sa.Column("payout_id", sa.String(64), nullable=True),
         sa.Column("reference", sa.String(64), nullable=False),
         sa.Column("amount", MONEY, nullable=False),
@@ -160,7 +187,9 @@ def upgrade() -> None:
     op.create_table(
         "webhook_events",
         sa.Column("event_id", sa.String(64), primary_key=True),
-        sa.Column("provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False),
+        sa.Column(
+            "provider_id", sa.String(32), sa.ForeignKey("providers.provider_id"), nullable=False
+        ),
         sa.Column("payout_id", sa.String(64), nullable=True),
         sa.Column("reference", sa.String(64), nullable=True),
         sa.Column("status", sa.String(24), sa.ForeignKey("attempt_statuses.code"), nullable=False),
@@ -173,15 +202,21 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("client_id", sa.String(32), sa.ForeignKey("clients.client_id"), nullable=False),
         sa.Column("scope", sa.String(64), nullable=False),
-        sa.Column("direction_id", sa.String(32), sa.ForeignKey("directions.direction_id"), nullable=True),
+        sa.Column(
+            "direction_id", sa.String(32), sa.ForeignKey("directions.direction_id"), nullable=True
+        ),
         sa.Column("category", sa.String(64), nullable=True),
-        sa.Column("period_type", sa.String(16), sa.ForeignKey("limit_period_types.code"), nullable=False),
+        sa.Column(
+            "period_type", sa.String(16), sa.ForeignKey("limit_period_types.code"), nullable=False
+        ),
         sa.Column("window_days", sa.Integer(), nullable=True),
         sa.Column("amount", MONEY, nullable=False),
         sa.Column("currency", sa.String(3), sa.ForeignKey("currencies.code"), nullable=False),
         sa.Column("weight", sa.Numeric(8, 5), nullable=False, server_default="1"),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.UniqueConstraint("client_id", "scope", "period_type", name="uq_limit_client_scope_period"),
+        sa.UniqueConstraint(
+            "client_id", "scope", "period_type", name="uq_limit_client_scope_period"
+        ),
     )
     op.create_index("ix_limit_definitions_client", "limit_definitions", ["client_id"])
 

@@ -321,3 +321,80 @@ async def test_reconcile_completes_lost_webhook(
     balance = (await api.get("/clients/c_001/balance")).json()
     with check:
         assert balance["balances"]["RUB"]["reserved"] == "0.00"
+
+
+async def test_rejected_webhook_event_is_audited(api, session) -> None:
+    from sqlalchemy import select
+
+    from app.models.tables import WebhookEvent as WebhookEventRow
+
+    raw = event("ffffffffffffffff", "COMPLETED", "ev-audit-1", "2026-11-05T12:00:00Z")
+    response = await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    assert response.status_code == 200
+    await session.commit()
+    rows = (await session.execute(select(WebhookEventRow))).scalars().all()
+    with check:
+        assert any(row.event_id == "ev-audit-1" for row in rows)
+
+
+async def test_webhook_rejects_bad_payout_id(api) -> None:
+    raw = event("ffffffffffffffff", "COMPLETED", "ev-bad-id", "2026-11-05T12:00:00Z")
+    payload = json.loads(raw)
+    payload["payout_id"] = "po_x/../../admin/ledger"
+    raw = json.dumps(payload).encode()
+    response = await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    with check:
+        assert response.status_code == 422
+
+
+async def test_unknown_webhook_status_rejected(api) -> None:
+    raw = event("ffffffffffffffff", "SUCCESS", "ev-status", "2026-11-05T12:00:00Z")
+    response = await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    with check:
+        assert response.status_code == 422
+    with check:
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_webhook_completed_updates_attempt_status(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    quote = await make_quote(api, freeze_rates, live_rates)
+
+    async def processing_get(self, provider_id, payout_id):
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="PROCESSING", failure_code=None
+        )
+
+    patch_provider(monkeypatch, create=accept_factory("po-att"), get=processing_get, find=no_find)
+    created = await post_transfer(api, quote["quote_id"], key="att-key")
+    with check:
+        assert created.status_code == 202
+    patch_provider(monkeypatch, get=complete_getter())
+    transfer_id = created.json()["transfer_id"]
+    raw = event(transfer_id.replace("-", ""), "COMPLETED", "ev-att", "2026-11-05T12:00:00Z")
+    payload = json.loads(raw)
+    payload["payout_id"] = "po-att"
+    raw = json.dumps(payload).encode()
+    await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    body = (await api.get(f"/transfers/{transfer_id}")).json()
+    with check:
+        assert body["status"] == "COMPLETED"
+    with check:
+        assert body["attempts"][-1]["status"] == "COMPLETED"

@@ -61,6 +61,8 @@ async def handle_webhook(
         raise ValidationError("webhook fields are invalid") from exc
     if not PAYOUT_ID_RE.fullmatch(event.payout_id):
         raise ValidationError("payout_id is invalid")
+    if event.status not in {"PROCESSING", "COMPLETED", "FAILED"}:
+        raise ValidationError(f"unknown webhook status {event.status}")
     if await session.get(WebhookEvent, event.event_id) is not None:
         return
     await transfer_repo.store_webhook_event(

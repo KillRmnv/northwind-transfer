@@ -56,6 +56,8 @@ async def create_transfer(
 ) -> TransferResponse:
     if not idempotency_key:
         raise ValidationError("Idempotency-Key header is required")
+    if len(idempotency_key) > 128:
+        raise ValidationError("Idempotency-Key must be at most 128 characters")
     idempotency_key = idempotency_key.strip()
     if not idempotency_key or len(idempotency_key) > 128:
         raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
@@ -84,6 +86,7 @@ async def create_transfer(
         response.headers["Location"] = f"/transfers/{fresh.transfer_id}"
     else:
         response.status_code = status.HTTP_202_ACCEPTED
+        response.headers["Location"] = f"/transfers/{fresh.transfer_id}"
     return transfer_to_response(fresh, attempts, history, minor_units)
 
 

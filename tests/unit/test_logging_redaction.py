@@ -105,3 +105,28 @@ def test_configure_logging_installs_redacting_handler() -> None:
         assert root.handlers
     with check:
         assert any(isinstance(item, RedactingFilter) for item in root.handlers[0].filters)
+
+
+def test_redacts_dsn_and_new_secret_names() -> None:
+    text = (
+        "dsn postgresql://u:hunter2@host:5432/db "
+        "access_token=abc client_secret='xyz' session_id: s1"
+    )
+    with check:
+        assert "hunter2" not in redact_text(text)
+    with check:
+        assert redact_text(text).count("*****") == 4
+
+
+def test_new_secret_key_matching_does_not_hide_client_id() -> None:
+    payload = redact_value(
+        {"X-Api-Key": "s", "tokenizer": "ok", "client_id": "c", "session_id": "sid"}
+    )
+    with check:
+        assert payload["X-Api-Key"] == "*****"
+    with check:
+        assert payload["tokenizer"] == "ok"
+    with check:
+        assert payload["client_id"] == "c"
+    with check:
+        assert payload["session_id"] == "*****"

@@ -69,6 +69,7 @@ async def create_transfer(
         recipient_bank=recipient.get("bank_code", ""),
         idempotency_key=idempotency_key,
         idempotency_hash=idempotency_hash,
+        funds_settled=False,
         created_at=now,
         updated_at=now,
     )

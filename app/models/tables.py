@@ -144,6 +144,7 @@ class Transfer(Base):
     recipient_bank: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     idempotency_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    funds_settled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
