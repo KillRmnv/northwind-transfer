@@ -81,9 +81,11 @@ async def _reconcile_one(
     if state.status == "COMPLETED":
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
         if locked is not None and locked.status not in TERMINAL:
-            await finalize_mod.complete_transfer(session, settings, locked, now_utc())
+            done = await finalize_mod.complete_transfer(session, settings, locked, now_utc())
             await session.commit()
-        stats["completed"] += 1
+            stats["completed" if done else "still_open"] += 1
+            return
+        stats["still_open"] += 1
         return
     if state.status == "FAILED":
         status = await run_attempts(session, settings, transfer.transfer_id, now_utc())

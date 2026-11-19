@@ -466,6 +466,8 @@ async def wait_for_settlement(
     transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
     if transfer is None or transfer.status in TERMINAL:
         return transfer.status if transfer else "FAILED"
-    await transfer_repo.set_status(session, transfer, "PROCESSING", now_utc())
+    updated = await transfer_repo.set_status_if_unsettled(
+        session, transfer_id, "PROCESSING", now_utc()
+    )
     await session.commit()
-    return "PROCESSING"
+    return "PROCESSING" if updated else "COMPLETED"

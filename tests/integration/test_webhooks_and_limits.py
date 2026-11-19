@@ -398,3 +398,32 @@ async def test_webhook_completed_updates_attempt_status(
         assert body["status"] == "COMPLETED"
     with check:
         assert body["attempts"][-1]["status"] == "COMPLETED"
+
+
+async def test_settled_transfer_cannot_be_reset_to_processing(
+    api, session, freeze_rates, live_rates, monkeypatch
+) -> None:
+    from sqlalchemy import text
+
+    from app.repositories import transfers as transfer_repo
+
+    quote = await make_quote(api, freeze_rates, live_rates)
+    patch_provider(
+        monkeypatch, create=accept_factory("po-reset"), get=complete_getter(), find=no_find
+    )
+    created = await post_transfer(api, quote["quote_id"], key="reset-key")
+    transfer_id = created.json()["transfer_id"]
+    await session.execute(text("update transfers set funds_settled = true, status = 'COMPLETED'"))
+    await session.commit()
+    import uuid as uuid_module
+
+    from app.core.clock import now_utc
+
+    updated = await transfer_repo.set_status_if_unsettled(
+        session, uuid_module.UUID(transfer_id), "PROCESSING", now_utc()
+    )
+    with check:
+        assert updated is False
+    body = (await api.get(f"/transfers/{transfer_id}")).json()
+    with check:
+        assert body["status"] == "COMPLETED"

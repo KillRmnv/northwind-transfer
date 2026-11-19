@@ -78,6 +78,21 @@ async def create_transfer(
     return row
 
 
+async def set_status_if_unsettled(
+    session: AsyncSession, transfer_id, status: str, now: datetime
+) -> bool:
+    result = await session.execute(
+        sa.update(Transfer)
+        .where(
+            Transfer.transfer_id == transfer_id,
+            Transfer.funds_settled.is_(False),
+            Transfer.status.not_in(["COMPLETED", "FAILED", "CANCELLED"]),
+        )
+        .values(status=status, updated_at=now)
+    )
+    return result.rowcount == 1
+
+
 async def set_status(session: AsyncSession, transfer: Transfer, status: str, now: datetime) -> None:
     transfer.status = status
     transfer.updated_at = now
