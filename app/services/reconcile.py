@@ -5,9 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clock import now_utc
 from app.core.settings import Settings
 from app.repositories import transfers as transfer_repo
-from app.services import finalize as finalize_mod
 from app.services.providers import ProviderClient
-from app.services.transfers import TERMINAL, run_attempts
+from app.services.transfer_machine import TERMINAL, TransferStateMachine
+from app.services.transfers import run_attempts
 
 
 def empty_stats() -> dict[str, int]:
@@ -81,11 +81,10 @@ async def _reconcile_one(
     if state.status == "COMPLETED":
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
         if locked is not None and locked.status not in TERMINAL:
-            done = await finalize_mod.complete_transfer(session, settings, locked, now_utc())
+            machine = TransferStateMachine(session, locked)
+            done = await machine.complete(now_utc())
             if not done:
-                await transfer_repo.force_status(
-                    session, locked.transfer_id, "COMPLETED", now_utc()
-                )
+                await machine.repair("COMPLETED", now_utc())
             await session.commit()
             stats["completed"] += 1
             return

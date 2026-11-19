@@ -34,8 +34,7 @@ from app.services.providers import (
 )
 from app.services.quotes import RateData
 from app.services.rates import RatesClient
-
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
+from app.services.transfer_machine import TERMINAL, TransferStateMachine
 
 
 async def resolve_unknown(
@@ -290,9 +289,7 @@ async def run_attempts(
         now,
     )
     if not scored:
-        from app.services import finalize as finalize_mod
-
-        await finalize_mod.fail_transfer(session, settings, transfer, now)
+        await TransferStateMachine(session, transfer).fail(now)
         await session.commit()
         return "FAILED"
     start_no = len(attempts) + 1
@@ -337,7 +334,7 @@ async def run_attempts(
             await transfer_repo.update_attempt(
                 session, pending_attempt, "PROCESSING", None, outcome.payout_id, now
             )
-            await transfer_repo.set_status(session, transfer, "PROCESSING", now)
+            await TransferStateMachine(session, transfer).start(now)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -362,7 +359,7 @@ async def run_attempts(
             await transfer_repo.update_attempt(
                 session, pending_attempt, "PROCESSING", "NEEDS_REVIEW", None, now
             )
-            await transfer_repo.set_status(session, transfer, "PROCESSING", now)
+            await TransferStateMachine(session, transfer).start(now)
             await session.commit()
             return "PROCESSING"
         found = outcome if isinstance(outcome, PayoutState) else None
@@ -381,7 +378,7 @@ async def run_attempts(
                 found.payout_id,
                 now,
             )
-            await transfer_repo.set_status(session, transfer, "PROCESSING", now)
+            await TransferStateMachine(session, transfer).start(now)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -405,9 +402,7 @@ async def run_attempts(
             now,
         )
         await session.commit()
-    from app.services import finalize as finalize_mod
-
-    await finalize_mod.fail_transfer(session, settings, transfer, now)
+    await TransferStateMachine(session, transfer).fail(now)
     await session.commit()
     return transfer.status
 
@@ -423,8 +418,6 @@ async def wait_for_settlement(
     started: datetime,
     poll_interval: float = 0.5,
 ) -> str:
-    from app.services import finalize as finalize_mod
-
     deadline = started.timestamp() + settings.api_sync_timeout_sec
     now = started
     while now.timestamp() < deadline:
@@ -444,19 +437,19 @@ async def wait_for_settlement(
                 session, current, state.status, state.failure_code, state.payout_id, now
             )
             await session.commit()
-        if state.status == "COMPLETED":
-            transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
-            if transfer is not None and transfer.status not in TERMINAL:
-                await finalize_mod.complete_transfer(session, settings, transfer, now)
-            await session.commit()
-            return "COMPLETED"
-        if state.status == "FAILED":
-            return "RETRY"
+        transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
+        if transfer is None:
+            return "FAILED"
+        action = await TransferStateMachine(session, transfer).settle_from_payout(state.status, now)
+        await session.commit()
+        if action != "PROCESSING":
+            return action
     transfer = await transfer_repo.get_transfer(session, transfer_id, lock=True)
     if transfer is None or transfer.status in TERMINAL:
         return transfer.status if transfer else "FAILED"
-    updated = await transfer_repo.set_status_if_unsettled(
-        session, transfer_id, "PROCESSING", now_utc()
-    )
+    started_processing = await TransferStateMachine(session, transfer).start(now_utc())
     await session.commit()
-    return "PROCESSING" if updated else "COMPLETED"
+    if started_processing:
+        return "PROCESSING"
+    await session.refresh(transfer)
+    return transfer.status

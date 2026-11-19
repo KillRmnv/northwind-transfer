@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,17 +37,23 @@ def parse_time(value: str) -> datetime:
     return parsed
 
 
-async def seed(session: AsyncSession, data_dir: Path) -> None:
-    currencies = json.loads((data_dir / "currencies.json").read_text(encoding="utf-8"))
-    for entry in currencies:
+def load_json(data_dir: Path, name: str) -> Any:
+    return json.loads((data_dir / f"{name}.json").read_text(encoding="utf-8"))
+
+
+async def seed_currencies(session: AsyncSession, data_dir: Path) -> None:
+    for entry in load_json(data_dir, "currencies"):
         await session.merge(Currency(code=entry["code"], minor_units=entry["minor_units"]))
 
-    tariffs = json.loads((data_dir / "tariffs.json").read_text(encoding="utf-8"))
-    for tariff in tariffs:
-        await session.merge(Country(code=tariff["source"]["country"]))
-        await session.merge(Country(code=tariff["target"]["country"]))
-        await session.merge(PayoutMethod(code=tariff["payout_method"]))
 
+async def seed_reference_data(session: AsyncSession, data_dir: Path) -> None:
+    tariffs = load_json(data_dir, "tariffs")
+    countries = {tariff["source"]["country"] for tariff in tariffs}
+    countries.update(tariff["target"]["country"] for tariff in tariffs)
+    for code in sorted(countries):
+        await session.merge(Country(code=code))
+    for code in sorted({tariff["payout_method"] for tariff in tariffs}):
+        await session.merge(PayoutMethod(code=code))
     for code in TRANSFER_STATUSES:
         await session.merge(TransferStatus(code=code))
     for code in ATTEMPT_STATUSES:
@@ -54,74 +61,100 @@ async def seed(session: AsyncSession, data_dir: Path) -> None:
     for code in LIMIT_PERIOD_TYPES:
         await session.merge(LimitPeriodType(code=code))
 
-    for tariff in tariffs:
-        fee = tariff["fee"]
-        limits = tariff["amount_limits"]
-        await session.merge(
-            Direction(
-                direction_id=tariff["direction_id"],
-                source_country=tariff["source"]["country"],
-                source_currency=tariff["source"]["currency"],
-                target_country=tariff["target"]["country"],
-                target_currency=tariff["target"]["currency"],
-                payout_method=tariff["payout_method"],
-                fee_percent=Decimal(str(fee["percent"])),
-                fee_fixed=Decimal(str(fee["fixed"])),
-                fee_min=Decimal(str(fee["min"])),
-                fee_charged_in=fee["charged_in"],
-                min_amount=Decimal(str(limits["min"])),
-                max_amount=Decimal(str(limits["max"])),
-                limit_currency=limits["currency"],
-                min_margin_percent=Decimal(str(tariff["min_margin_percent"])),
-                quote_ttl_sec=int(tariff["quote_ttl_sec"]),
+
+def build_direction(tariff: dict) -> Direction:
+    fee = tariff["fee"]
+    limits = tariff["amount_limits"]
+    return Direction(
+        direction_id=tariff["direction_id"],
+        source_country=tariff["source"]["country"],
+        source_currency=tariff["source"]["currency"],
+        target_country=tariff["target"]["country"],
+        target_currency=tariff["target"]["currency"],
+        payout_method=tariff["payout_method"],
+        fee_percent=Decimal(str(fee["percent"])),
+        fee_fixed=Decimal(str(fee["fixed"])),
+        fee_min=Decimal(str(fee["min"])),
+        fee_charged_in=fee["charged_in"],
+        min_amount=Decimal(str(limits["min"])),
+        max_amount=Decimal(str(limits["max"])),
+        limit_currency=limits["currency"],
+        min_margin_percent=Decimal(str(tariff["min_margin_percent"])),
+        quote_ttl_sec=int(tariff["quote_ttl_sec"]),
+    )
+
+
+async def seed_directions(session: AsyncSession, data_dir: Path) -> None:
+    for tariff in load_json(data_dir, "tariffs"):
+        await session.merge(build_direction(tariff))
+
+
+def build_provider(entry: dict) -> Provider:
+    fee = entry["fee"]
+    limits = entry["limits"]
+    return Provider(
+        provider_id=entry["provider_id"],
+        currency=entry["currency"],
+        fee_percent=Decimal(str(fee["percent"])),
+        fee_fixed=Decimal(str(fee["fixed"])),
+        limit_min=Decimal(str(limits["min"])),
+        limit_max=Decimal(str(limits["max"])),
+        success_rate_24h=Decimal(str(entry["success_rate_24h"])),
+        p95_latency_ms=int(entry["p95_latency_ms"]),
+        enabled=bool(entry["enabled"]),
+    )
+
+
+async def seed_provider_windows(session: AsyncSession, provider_id: str, windows: list) -> None:
+    existing = (
+        (
+            await session.execute(
+                select(MaintenanceWindow).where(MaintenanceWindow.provider_id == provider_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in existing:
+        await session.delete(row)
+    for window in windows:
+        session.add(
+            MaintenanceWindow(
+                provider_id=provider_id,
+                from_at=parse_time(window["from"]),
+                to_at=parse_time(window["to"]),
             )
         )
 
-    providers = json.loads((data_dir / "providers.json").read_text(encoding="utf-8"))
-    for provider in providers:
-        fee = provider["fee"]
-        limits = provider["limits"]
-        await session.merge(
-            Provider(
-                provider_id=provider["provider_id"],
-                currency=provider["currency"],
-                fee_percent=Decimal(str(fee["percent"])),
-                fee_fixed=Decimal(str(fee["fixed"])),
-                limit_min=Decimal(str(limits["min"])),
-                limit_max=Decimal(str(limits["max"])),
-                success_rate_24h=Decimal(str(provider["success_rate_24h"])),
-                p95_latency_ms=int(provider["p95_latency_ms"]),
-                enabled=bool(provider["enabled"]),
-            )
-        )
-        for direction_id in provider["directions"]:
+
+async def seed_providers(session: AsyncSession, data_dir: Path) -> None:
+    for entry in load_json(data_dir, "providers"):
+        await session.merge(build_provider(entry))
+        for direction_id in entry["directions"]:
             await session.merge(
-                ProviderDirection(provider_id=provider["provider_id"], direction_id=direction_id)
+                ProviderDirection(provider_id=entry["provider_id"], direction_id=direction_id)
             )
-        existing = (
-            (
-                await session.execute(
-                    select(MaintenanceWindow).where(
-                        MaintenanceWindow.provider_id == provider["provider_id"]
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        await seed_provider_windows(
+            session, entry["provider_id"], entry.get("maintenance_windows", [])
         )
-        for row in existing:
-            await session.delete(row)
-        for window in provider.get("maintenance_windows", []):
+
+
+async def seed_client_balances(session: AsyncSession, client: dict) -> None:
+    for currency, amount in client["balances"].items():
+        row = await session.get(Balance, (client["client_id"], currency))
+        if row is None:
             session.add(
-                MaintenanceWindow(
-                    provider_id=provider["provider_id"],
-                    from_at=parse_time(window["from"]),
-                    to_at=parse_time(window["to"]),
+                Balance(
+                    client_id=client["client_id"],
+                    currency=currency,
+                    available=Decimal(str(amount)),
+                    reserved=Decimal("0"),
                 )
             )
 
-    clients = json.loads((data_dir / "clients.json").read_text(encoding="utf-8"))
-    for client in clients:
+
+async def seed_clients(session: AsyncSession, data_dir: Path) -> None:
+    for client in load_json(data_dir, "clients"):
         await session.merge(
             Client(
                 client_id=client["client_id"],
@@ -129,17 +162,15 @@ async def seed(session: AsyncSession, data_dir: Path) -> None:
                 daily_limit_currency=client["daily_limit"]["currency"],
             )
         )
-        for currency, amount in client["balances"].items():
-            row = await session.get(Balance, (client["client_id"], currency))
-            if row is None:
-                session.add(
-                    Balance(
-                        client_id=client["client_id"],
-                        currency=currency,
-                        available=Decimal(str(amount)),
-                        reserved=Decimal("0"),
-                    )
-                )
+        await seed_client_balances(session, client)
+
+
+async def seed(session: AsyncSession, data_dir: Path) -> None:
+    await seed_currencies(session, data_dir)
+    await seed_reference_data(session, data_dir)
+    await seed_directions(session, data_dir)
+    await seed_providers(session, data_dir)
+    await seed_clients(session, data_dir)
     await session.commit()
 
 

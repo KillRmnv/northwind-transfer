@@ -12,9 +12,9 @@ from app.core.settings import Settings
 from app.models.tables import Provider, WebhookEvent
 from app.repositories import transfers as transfer_repo
 from app.schemas.webhooks import WebhookEvent as WebhookEventSchema
-from app.services import finalize as finalize_mod
 from app.services.providers import ProviderClient
-from app.services.transfers import TERMINAL, run_attempts
+from app.services.transfer_machine import TERMINAL, TransferStateMachine
+from app.services.transfers import run_attempts
 
 PAYOUT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -97,8 +97,9 @@ async def _process_event(
         if state is None or state.status != "COMPLETED":
             return
         locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
-        if locked is not None and locked.status not in TERMINAL:
-            await finalize_mod.complete_transfer(session, settings, locked, now_utc())
+        if locked is not None:
+            await TransferStateMachine(session, locked).complete(now_utc())
+            await session.commit()
         return
     if event.status == "FAILED":
         if state is not None and state.status == "COMPLETED":

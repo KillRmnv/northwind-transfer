@@ -243,3 +243,15 @@ Chaos 300 поймал редкую гонку: `wait_for_settlement` по ис�
 Валидные `try` остались только там, где это управление потоком верхнего уровня, а не обработка: сторож фоновой сверки и log-and-reraise в middleware (`app/main.py`), `session.begin_nested()` в репозитории.
 
 Причина: `try/except` посреди бизнес-логики делает код нечитаемым и прячет контракт ошибок. Единое место перевода + единый рендер дают тот же эффект, что связка unchecked-исключений и `@ControllerAdvice` в Spring.
+
+## D28. Машина состояний вместо лесенок if
+
+`TransferStateMachine` (`app/services/transfer_machine.py`) — единственное место, знающее граф переходов:
+
+- `EDGES`: `PENDING → {PROCESSING, COMPLETED, FAILED, CANCELLED}`, `PROCESSING → {COMPLETED, FAILED, CANCELLED}`, терминальные без исходящих; `can()` — чистая проверка по таблице, покрыта unit-тестом на все рёбра;
+- `start/complete/fail` — атомарные переходы (один UPDATE + эффект на резерв + синхронизация попытки), `settle_from_payout` — таблица `{"COMPLETED": complete, "FAILED": retry}`;
+- `finalize.py` удалён: его логика переехала в машину, вызовы в `run_attempts`, вебхуках и сверке заменены на методы машины.
+
+Роут `POST /transfers` разбит на `require_idempotency_key`, `load_transfer_view`, `respond_with_outcome`; сидер — на `seed_currencies/reference_data/directions/providers/clients` с `build_*`-конструкторами.
+
+Причина: лесенки `if status == ...` расползались по трём сервисам и расходились друг с другом (одна ветка считала терминалом то, что другая перезаписывала). Таблица переходов + один исполнитель устраняют класс рассинхрона целиком, а мелкие функции делают роуты читаемыми без потери поведения — 136 тестов зелёные.

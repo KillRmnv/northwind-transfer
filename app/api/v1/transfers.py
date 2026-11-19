@@ -32,6 +32,31 @@ async def build_history(session: AsyncSession, transfer) -> list[tuple]:
     return items
 
 
+def require_idempotency_key(value: str | None) -> str:
+    key = (value or "").strip()
+    if not key or len(key) > 128:
+        raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
+    return key
+
+
+async def load_transfer_view(session: AsyncSession, transfer_id: UUID) -> TransferResponse:
+    transfer = await transfer_repo.get_transfer(session, transfer_id)
+    if transfer is None:
+        raise TransferNotFoundError(str(transfer_id))
+    minor_units = await load_minor_units(session)
+    history = await build_history(session, transfer)
+    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    return transfer_to_response(transfer, attempts, history, minor_units)
+
+
+def respond_with_outcome(response: Response, transfer_id: UUID, final_status: str) -> None:
+    if final_status == "COMPLETED":
+        response.status_code = status.HTTP_201_CREATED
+    else:
+        response.status_code = status.HTTP_202_ACCEPTED
+    response.headers["Location"] = f"/transfers/{transfer_id}"
+
+
 @router.post(
     "/transfers",
     response_model=TransferResponse,
@@ -51,13 +76,7 @@ async def create_transfer(
     session: AsyncSession = Depends(get_session),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> TransferResponse:
-    if not idempotency_key:
-        raise ValidationError("Idempotency-Key header is required")
-    if len(idempotency_key) > 128:
-        raise ValidationError("Idempotency-Key must be at most 128 characters")
-    idempotency_key = idempotency_key.strip()
-    if not idempotency_key or len(idempotency_key) > 128:
-        raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
+    key = require_idempotency_key(idempotency_key)
     now = now_utc()
     transfer, _ = await transfer_service.create_transfer(
         session,
@@ -65,22 +84,12 @@ async def create_transfer(
         request.quote_id,
         request.client_id,
         request.recipient.model_dump(),
-        idempotency_key,
+        key,
         now,
     )
     final_status = await transfer_service.run_attempts(session, settings, transfer.transfer_id, now)
-    fresh = await transfer_repo.get_transfer(session, transfer.transfer_id)
-    assert fresh is not None
-    minor_units = await load_minor_units(session)
-    history = await build_history(session, fresh)
-    attempts = await transfer_repo.latest_attempts(session, fresh.transfer_id)
-    if final_status == "COMPLETED":
-        response.status_code = status.HTTP_201_CREATED
-        response.headers["Location"] = f"/transfers/{fresh.transfer_id}"
-    else:
-        response.status_code = status.HTTP_202_ACCEPTED
-        response.headers["Location"] = f"/transfers/{fresh.transfer_id}"
-    return transfer_to_response(fresh, attempts, history, minor_units)
+    respond_with_outcome(response, transfer.transfer_id, final_status)
+    return await load_transfer_view(session, transfer.transfer_id)
 
 
 @router.get(
@@ -95,13 +104,7 @@ async def create_transfer(
 async def read_transfer(
     transfer_id: UUID, session: AsyncSession = Depends(get_session)
 ) -> TransferResponse:
-    transfer = await transfer_repo.get_transfer(session, transfer_id)
-    if transfer is None:
-        raise TransferNotFoundError(str(transfer_id))
-    minor_units = await load_minor_units(session)
-    history = await build_history(session, transfer)
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-    return transfer_to_response(transfer, attempts, history, minor_units)
+    return await load_transfer_view(session, transfer_id)
 
 
 @router.get(
