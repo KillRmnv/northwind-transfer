@@ -134,9 +134,10 @@ def score_providers(
 
 
 class ProviderClient:
-    def __init__(self, base_url: str, timeout_sec: float) -> None:
+    def __init__(self, base_url: str, timeout_sec: float, scenario: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_sec
+        self._scenario = scenario
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self._timeout)
@@ -152,6 +153,8 @@ class ProviderClient:
         idempotency_key: str,
     ) -> CreateOutcome:
         headers = {"Idempotency-Key": idempotency_key}
+        if self._scenario is not None:
+            headers["X-Scenario"] = self._scenario
         body = {
             "reference": reference,
             "amount": amount,

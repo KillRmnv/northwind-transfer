@@ -99,6 +99,7 @@
 | R-44 | P2 | ✅ | `from_status` читается из свежего чтения строки под `FOR UPDATE` (`_previous_locked` в `start`/`needs_review`/`_settle`/`repair`). Прямой `PENDING → COMPLETED` — валиден по `EDGES`, в D31 отражён. Тест `test_history_from_status_uses_locked_row` (устаревший объект в памяти → `from == PROCESSING`). |
 | R-45 | P3 | ✅ | Новый `scripts/chaos_audit.py` (вендорный `chaos_run.py` не тронут): зависшие `NEEDS_REVIEW` старше grace и `FAILED` с живой выплатой `PROCESSING` в ledger; exit 1 при нарушениях. |
 | R-46 | P1 | ✅ | `examples/` возвращены к стартовому состоянию (`git checkout -- examples`); `test_examples` сравнивает курс численно (`Decimal`), точность строк (`0.42000000`) проверяют `test_quotes_api`/`test_mappers`. Отклонение от иллюстрации ТЗ (§5, `0.4200`) зафиксировано в D2/A1/A3: суммы идентичны, отличается только число знаков. |
+| R-47 | P2 | ✅ | `X-Scenario` мока (ТЗ §7) сервис не отправлял; сценарии `ok`/`decline`/`error_5xx`/`slow` проверялись только фейками. Добавлен тестовый шов `ProviderClient(scenario)` + `tests/integration/test_mock_contract.py` против живого мока (D34).
 
 ---
 
@@ -314,7 +315,7 @@
 
 ## Итог прогона
 
-- `uv run pytest` в compose-сети (полный набор): **166 passed**, 1 warning (deprecation `starlette.testclient`). Пробы аудита — постоянные тесты (`test_young_pending_attempt_blocks_next_provider`, `test_persistent_5xx_reaches_terminal_failed`, `test_needs_review_counts_toward_daily_limit`, `test_webhook_failed_moves_to_next_provider`, `test_expired_quote_with_confirmed_payout_completes`, `test_expired_quote_with_young_pending_keeps_reserve_for_review`, `test_processing_transition_uses_confirmation_time`, `test_history_from_status_uses_locked_row`, `test_reconcile_lock_single_runner`, `test_unknown_limit_scope_rejected_at_write`).
+- `uv run pytest` в compose-сети (полный набор): **170 passed**, 1 warning (deprecation `starlette.testclient`). Пробы аудита — постоянные тесты (`test_young_pending_attempt_blocks_next_provider`, `test_persistent_5xx_reaches_terminal_failed`, `test_needs_review_counts_toward_daily_limit`, `test_webhook_failed_moves_to_next_provider`, `test_expired_quote_with_confirmed_payout_completes`, `test_expired_quote_with_young_pending_keeps_reserve_for_review`, `test_processing_transition_uses_confirmation_time`, `test_history_from_status_uses_locked_row`, `test_reconcile_lock_single_runner`, `test_unknown_limit_scope_rejected_at_write`) плюс `tests/integration/test_mock_contract.py`: `ok`/`decline`/`error_5xx`/`slow` против живого мока через `X-Scenario` (R-47, D34).
 - Chaos после закрытия пунктов (образ с фиксами, dev-БД пересоздана перед каждым прогоном, мок в `chaos`, `--concurrency 10`): seed 7 — **300, `RESULT: OK`** (282 `COMPLETED`, 18 `FAILED`, 52 дубля); seed 11 — **300, `RESULT: OK`** (285/15, 38 дублей); seed 42 — **300, `RESULT: OK`** (285/15, 42 дубля). Везде 0 нарушений; `scripts/chaos_audit.py` — 0 зависших `NEEDS_REVIEW`, 0 `FAILED` с живой выплатой, exit 0.
 
 ## Закрытие R-33…R-46
