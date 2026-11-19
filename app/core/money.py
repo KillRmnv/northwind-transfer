@@ -7,9 +7,13 @@ def ceil_to_minor(value: Decimal, minor_units: int) -> Decimal:
     return value.quantize(quantum(minor_units), rounding=ROUND_CEILING)
 
 
-def quantize_rate(rate: Decimal, places: int = 4) -> Decimal:
+def quantize_rate(rate: Decimal, places: int = 8) -> Decimal:
     quantum = Decimal("1." + "0" * places)
     return rate.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def format_rate(rate: Decimal, places: int = 8) -> str:
+    return f"{quantize_rate(rate, places):f}"
 
 
 def quantum(minor_units: int) -> Decimal:

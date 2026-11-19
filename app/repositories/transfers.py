@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import IdempotencyConflictError
+from app.core.parse import try_parse_uuid
 from app.models.tables import PayoutAttempt, Quote, Transfer, WebhookEvent
 from app.repositories.balances import for_update
 
@@ -69,9 +70,8 @@ async def history_for_transfer(session: AsyncSession, transfer_id) -> list:
 
 
 async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Transfer | None:
-    try:
-        transfer_id = uuid.UUID(reference)
-    except ValueError:
+    transfer_id = try_parse_uuid(reference)
+    if transfer_id is None:
         return None
     return await get_transfer(session, transfer_id)
 
@@ -188,7 +188,7 @@ async def sum_day_source(
             transfer_alias.c.client_id == client_id,
             transfer_alias.c.created_at >= day_start,
             transfer_alias.c.created_at < day_end,
-            transfer_alias.c.status.in_(["PENDING", "PROCESSING", "COMPLETED"]),
+            transfer_alias.c.status.in_(["PENDING", "PROCESSING", "NEEDS_REVIEW", "COMPLETED"]),
         )
     )
     rows = (await session.execute(query)).all()
@@ -214,7 +214,7 @@ async def sum_window_source(
         .where(
             transfer_alias.c.client_id == client_id,
             transfer_alias.c.created_at >= window_start,
-            transfer_alias.c.status.in_(["PENDING", "PROCESSING", "COMPLETED"]),
+            transfer_alias.c.status.in_(["PENDING", "PROCESSING", "NEEDS_REVIEW", "COMPLETED"]),
         )
     )
     if direction_id is not None:

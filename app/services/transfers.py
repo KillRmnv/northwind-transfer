@@ -123,6 +123,80 @@ async def create_with_recovery(
     return None
 
 
+async def _probe_pending(
+    session: AsyncSession,
+    client: ProviderClient,
+    transfer_id: uuid.UUID,
+    reference: str,
+    attempts: list,
+) -> list:
+    for pending in [a for a in attempts if a.status == "PROCESSING" and not a.payout_id]:
+        outcome, state = await client.probe_payout(pending.provider_id, reference)
+        probed_at = now_utc()
+        if outcome == "found" and state is not None:
+            await transfer_repo.update_attempt(
+                session, pending, state.status, state.failure_code, state.payout_id, probed_at
+            )
+            await session.commit()
+        elif (
+            outcome == "missing"
+            and (probed_at - as_utc(pending.created_at)).total_seconds()
+            >= UNRESOLVED_RETRY_AFTER_SEC
+        ):
+            await transfer_repo.update_attempt(
+                session, pending, "FAILED", "PROVIDER_UNREACHABLE", None, probed_at
+            )
+            await session.commit()
+    return await transfer_repo.latest_attempts(session, transfer_id)
+
+
+def _young_unconfirmed(attempts: list) -> list:
+    moment = now_utc()
+    return [
+        a
+        for a in attempts
+        if a.status == "PROCESSING"
+        and not a.payout_id
+        and (moment - as_utc(a.created_at)).total_seconds() < UNRESOLVED_RETRY_AFTER_SEC
+    ]
+
+
+async def _settle_expired(
+    session: AsyncSession,
+    settings: Settings,
+    client: ProviderClient,
+    transfer,
+    reference: str,
+    now: datetime,
+    actor: str,
+) -> str:
+    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    attempts = await _probe_pending(session, client, transfer.transfer_id, reference, attempts)
+    live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
+    if live:
+        last = live[-1]
+        settlement = await wait_for_settlement(
+            session,
+            settings,
+            client,
+            transfer.transfer_id,
+            last.provider_id,
+            last.payout_id or "",
+            reference,
+            now,
+            actor=actor,
+        )
+        if settlement != "RETRY":
+            return settlement
+    if _young_unconfirmed(attempts):
+        await TransferStateMachine(session, transfer).needs_review(now, actor)
+        await session.commit()
+        return "NEEDS_REVIEW"
+    await TransferStateMachine(session, transfer).fail(now, actor)
+    await session.commit()
+    return "FAILED"
+
+
 async def live_rates_map(settings: Settings) -> dict[tuple[str, str], RateData]:
     return await RatesClient(settings.mock_provider_url, settings.mock_provider_timeout_sec).fetch()
 
@@ -278,48 +352,34 @@ async def run_attempts(
     quote = await get_quote(session, transfer.quote_id)
     if quote is None:
         raise QuoteNotFoundError(str(transfer.quote_id))
-    if as_utc(quote.expires_at) <= as_utc(now):
-        attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-        live = [a for a in attempts if a.payout_id]
-        if live:
-            return transfer.status
-        await TransferStateMachine(session, transfer).fail(now, actor)
-        await session.commit()
-        return "FAILED"
     client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     reference = reference_for(transfer.transfer_id)
-    for pending in [a for a in attempts if a.status == "PROCESSING" and not a.payout_id]:
-        outcome, state = await client.probe_payout(pending.provider_id, reference)
-        probed_at = now_utc()
-        if outcome == "found" and state is not None:
-            await transfer_repo.update_attempt(
-                session, pending, state.status, state.failure_code, state.payout_id, probed_at
-            )
-            await session.commit()
-        elif (
-            outcome == "missing"
-            and (probed_at - as_utc(pending.created_at)).total_seconds()
-            >= UNRESOLVED_RETRY_AFTER_SEC
-        ):
-            await transfer_repo.update_attempt(
-                session, pending, "FAILED", "PROVIDER_UNREACHABLE", None, probed_at
-            )
-            await session.commit()
+    if as_utc(quote.expires_at) <= as_utc(now):
+        return await _settle_expired(session, settings, client, transfer, reference, now, actor)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    attempts = await _probe_pending(session, client, transfer.transfer_id, reference, attempts)
+    if _young_unconfirmed(attempts):
+        await TransferStateMachine(session, transfer).needs_review(now, actor)
+        await session.commit()
+        return "NEEDS_REVIEW"
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
     if live:
         last = live[-1]
-        return await wait_for_settlement(
+        settlement = await wait_for_settlement(
             session,
             settings,
             client,
             transfer.transfer_id,
             last.provider_id,
             last.payout_id or "",
-            reference_for(transfer.transfer_id),
+            reference,
             now,
         )
+        if settlement != "RETRY":
+            return settlement
+        attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    if as_utc(quote.expires_at) <= as_utc(now):
+        return await _settle_expired(session, settings, client, transfer, reference, now, actor)
     tariffs = await load_tariffs(session)
     tariff = find_tariff(tariffs, quote.direction_id)
     client_fee_source = Decimal(quote.fee_amount)
@@ -389,7 +449,7 @@ async def run_attempts(
             await transfer_repo.update_attempt(
                 session, pending_attempt, "PROCESSING", None, outcome.payout_id, now
             )
-            await TransferStateMachine(session, transfer).start(now, actor)
+            await TransferStateMachine(session, transfer).start(now_utc(), actor)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -434,7 +494,7 @@ async def run_attempts(
                 found.payout_id,
                 now,
             )
-            await TransferStateMachine(session, transfer).start(now, actor)
+            await TransferStateMachine(session, transfer).start(now_utc(), actor)
             await session.commit()
             settlement = await wait_for_settlement(
                 session,
@@ -453,14 +513,13 @@ async def run_attempts(
         await transfer_repo.update_attempt(
             session,
             pending_attempt,
-            "PROCESSING",
-            "NEEDS_REVIEW",
+            "FAILED",
+            "PROVIDER_UNREACHABLE",
             None,
             now,
         )
-        await TransferStateMachine(session, transfer).needs_review(now, actor)
         await session.commit()
-        return "NEEDS_REVIEW"
+        continue
     await TransferStateMachine(session, transfer).fail(now, actor)
     await session.commit()
     return transfer.status

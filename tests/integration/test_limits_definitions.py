@@ -208,3 +208,13 @@ async def test_unconvertible_limit_currency_fails_closed(
         assert response.status_code == 422
     with check:
         assert response.json()["error"]["code"] == "RATE_UNAVAILABLE"
+
+
+async def test_unknown_limit_scope_rejected_at_write(session) -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    await seed_limit(session, "c_001", scope="direction", direction_id="RU-TH-BANK")
+    with pytest.raises(IntegrityError):
+        await seed_limit(session, "c_001", scope="category", category="food")
+    await session.rollback()

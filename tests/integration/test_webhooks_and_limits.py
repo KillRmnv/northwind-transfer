@@ -221,12 +221,27 @@ async def test_foreign_payout_id_does_not_complete(
         assert status == "PROCESSING"
 
 
-async def test_empty_webhook_secret_fails_closed(api, monkeypatch) -> None:
+async def test_empty_webhook_secret_fails_closed(api, monkeypatch, session) -> None:
+    from sqlalchemy import select
+
+    from app.models.tables import WebhookEvent as WebhookEventRow
+
     monkeypatch.setattr(app_settings, "provider_webhook_secret", "")
     raw = event("ffffffffffffffff", "COMPLETED", "ev-nosecret", "2026-11-05T12:00:00Z")
     response = await api.post("/webhooks/prov_alpha", content=raw)
     with check:
         assert response.status_code == 503
+    rows = (
+        (
+            await session.execute(
+                select(WebhookEventRow).where(WebhookEventRow.event_id == "ev-nosecret")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    with check:
+        assert rows == []
 
 
 async def test_async_failed_falls_back_without_reconcile(
@@ -259,6 +274,57 @@ async def test_async_failed_falls_back_without_reconcile(
         assert len(body["attempts"]) == 2
     with check:
         assert body["attempts"][0]["status"] == "FAILED"
+
+
+async def test_webhook_failed_moves_to_next_provider(
+    api, freeze_rates, live_rates, monkeypatch
+) -> None:
+    quote = await make_quote(api, freeze_rates, live_rates)
+    calls = []
+
+    async def fake_create(self, provider_id, *args, **kwargs):
+        calls.append(provider_id)
+        return providers_module.Accepted(payout_id=f"po-wh-{len(calls)}", status="PROCESSING")
+
+    async def processing_get(self, provider_id, payout_id):
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="PROCESSING", failure_code=None
+        )
+
+    patch_provider(monkeypatch, create=fake_create, get=processing_get, find=no_find)
+    created = await post_transfer(api, quote["quote_id"], key="wh-fail-next")
+    with check:
+        assert created.status_code == 202
+    reference = created.json()["transfer_id"].replace("-", "")
+
+    async def failed_first_get(self, provider_id, payout_id):
+        if payout_id == "po-wh-1":
+            return providers_module.PayoutState(
+                payout_id=payout_id, reference="", status="FAILED", failure_code="ACCOUNT_CLOSED"
+            )
+        return providers_module.PayoutState(
+            payout_id=payout_id, reference="", status="COMPLETED", failure_code=None
+        )
+
+    monkeypatch.setattr(providers_module.ProviderClient, "get_payout", failed_first_get)
+    raw = event(reference, "FAILED", "ev-wh-fail", "2026-11-05T12:00:00Z")
+    payload = json.loads(raw)
+    payload["payout_id"] = "po-wh-1"
+    raw = json.dumps(payload).encode()
+    response = await api.post(
+        "/webhooks/prov_alpha",
+        content=raw,
+        headers={"X-Signature": sign(app_settings.provider_webhook_secret, raw)},
+    )
+    with check:
+        assert response.status_code == 200
+    got = (await api.get(f"/transfers/{created.json()['transfer_id']}")).json()
+    with check:
+        assert got["status"] == "COMPLETED"
+    with check:
+        assert len(calls) == 2
+    with check:
+        assert len(got["attempts"]) == 2
 
 
 async def test_missing_signature_returns_401(api) -> None:

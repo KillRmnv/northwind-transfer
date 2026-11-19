@@ -246,4 +246,5 @@ class LimitDefinition(Base):
     __table_args__ = (
         UniqueConstraint("client_id", "scope", "period_type", name="uq_limit_client_scope_period"),
         Index("ix_limit_definitions_client", "client_id"),
+        CheckConstraint("scope in ('client', 'direction')", name="ck_limit_definitions_scope"),
     )

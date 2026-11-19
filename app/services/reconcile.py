@@ -1,13 +1,33 @@
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import now_utc
 from app.core.settings import Settings
+from app.models.tables import Transfer
 from app.repositories import transfers as transfer_repo
 from app.services.providers import ProviderClient
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
 from app.services.transfers import run_attempts_locked as run_attempts
+
+RECONCILE_ADVISORY_KEY = 410729831
+
+
+async def try_reconcile_lock(session: AsyncSession) -> bool:
+    bind = session.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return True
+    await session.connection()
+    row = await session.execute(sa.text(f"SELECT pg_try_advisory_lock({RECONCILE_ADVISORY_KEY})"))
+    return bool(row.scalar_one())
+
+
+async def release_reconcile_lock(session: AsyncSession) -> None:
+    bind = session.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    await session.execute(sa.text(f"SELECT pg_advisory_unlock({RECONCILE_ADVISORY_KEY})"))
 
 
 def empty_stats() -> dict[str, int]:
@@ -20,11 +40,19 @@ async def list_open_transfers(session: AsyncSession, limit: int = 200) -> list:
 
 async def reconcile_once(session: AsyncSession, settings: Settings, now: datetime) -> dict:
     stats = empty_stats()
-    transfers = await list_open_transfers(session)
-    client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
-    for transfer in transfers:
-        stats["checked"] += 1
-        await _reconcile_one(session, settings, client, transfer, now, stats)
+    if not await try_reconcile_lock(session):
+        return stats
+    try:
+        transfers = await list_open_transfers(session)
+        client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
+        for transfer in transfers:
+            stats["checked"] += 1
+            await _reconcile_one(session, settings, client, transfer, now, stats)
+            await _touch(session, transfer.transfer_id, now_utc())
+        await session.commit()
+    finally:
+        await release_reconcile_lock(session)
+        await session.commit()
     return stats
 
 
@@ -41,6 +69,7 @@ async def reconcile_transfer(
         settings.mock_provider_url, settings.mock_provider_timeout_sec
     )
     await _reconcile_one(session, settings, client, transfer, now, stats)
+    await _touch(session, transfer.transfer_id, now_utc())
     return stats
 
 
@@ -112,3 +141,9 @@ def _tally(stats: dict, status: str) -> None:
         stats["failed"] += 1
     else:
         stats["still_open"] += 1
+
+
+async def _touch(session: AsyncSession, transfer_id, now: datetime) -> None:
+    await session.execute(
+        sa.update(Transfer).where(Transfer.transfer_id == transfer_id).values(updated_at=now)
+    )

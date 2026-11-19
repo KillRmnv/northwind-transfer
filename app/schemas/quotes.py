@@ -75,8 +75,8 @@ class QuoteResponse(BaseModel):
         description="Сумма, уходящая в конвертацию (за вычетом комиссии)"
     )
     rate: str = Field(
-        description="Курс: единиц валюты получателя за единицу валюты отправителя, 4 знака",
-        examples=["0.4200"],
+        description="Курс: единиц валюты получателя за единицу валюты отправителя, 8 знаков",
+        examples=["0.42000000"],
     )
     target_amount: Money = Field(description="Сумма к выплате получателю")
     breakdown: list[str] = Field(

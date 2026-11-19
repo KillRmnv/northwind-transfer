@@ -45,15 +45,16 @@ def test_models_do_not_import_outer_layers() -> None:
 
 
 def test_no_try_except_in_services_and_api() -> None:
+    import ast
     from pathlib import Path
 
     offenders = []
     for base in (Path("app/services"), Path("app/api")):
         for path in base.rglob("*.py"):
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                stripped = line.strip()
-                if stripped == "try:" or stripped.startswith("except"):
-                    offenders.append(f"{path}:{number}: {stripped}")
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try) and node.handlers:
+                    offenders.append(f"{path}:{node.lineno}: try/except")
     assert offenders == []
 
 

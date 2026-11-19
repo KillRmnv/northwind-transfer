@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from app.core.exceptions import ValidationError
-from app.core.money import format_money
+from app.core.money import format_money, format_rate
 from app.core.types import QuoteResult
 from app.models.tables import Quote, Transfer
 from app.schemas.balances import BalanceResponse, CurrencyBalance
@@ -32,7 +32,7 @@ def quote_to_response(
         source_amount=money(result.source_amount, result.source_currency, minor_units),
         fee=money(result.fee_amount, result.fee_currency, minor_units),
         amount_to_convert=money(result.amount_to_convert, result.source_currency, minor_units),
-        rate=f"{result.rate:.4f}",
+        rate=format_rate(result.rate),
         target_amount=money(result.target_amount, result.target_currency, minor_units),
         breakdown=result.breakdown if breakdown is None else breakdown,
         expires_at=expires_at,
@@ -46,7 +46,7 @@ def quote_row_to_response(quote: Quote, minor_units: dict[str, int]) -> QuoteRes
         source_amount=money(quote.source_amount, quote.source_currency, minor_units),
         fee=money(quote.fee_amount, quote.fee_currency, minor_units),
         amount_to_convert=money(quote.amount_to_convert, quote.source_currency, minor_units),
-        rate=f"{Decimal(quote.rate):.4f}",
+        rate=format_rate(Decimal(quote.rate)),
         target_amount=money(quote.target_amount, quote.target_currency, minor_units),
         breakdown=list(quote.breakdown or []),
         expires_at=quote.expires_at,

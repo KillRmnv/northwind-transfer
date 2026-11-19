@@ -7,7 +7,14 @@ from app.core.exceptions import (
     RateUnavailableError,
     UnsupportedDirectionError,
 )
-from app.core.money import ceil_to_minor, format_money, quantize_rate, quantum, round_money
+from app.core.money import (
+    ceil_to_minor,
+    format_money,
+    format_rate,
+    quantize_rate,
+    quantum,
+    round_money,
+)
 from app.core.types import QuoteResult, RateData, TariffData
 
 __all__ = [
@@ -16,7 +23,6 @@ __all__ = [
     "TariffData",
 ]
 
-RATE_DISPLAY_PLACES = 4
 RATE_STALE_AFTER_HOURS = 6
 
 
@@ -294,7 +300,3 @@ def amount_in_limit_currency(
     ):
         return amount * rate
     return None
-
-
-def format_rate(rate: Decimal) -> str:
-    return f"{rate:.{RATE_DISPLAY_PLACES}f}"

@@ -36,7 +36,7 @@ async def test_create_and_read_quote(api, freeze_rates, live_rates) -> None:
     with check:
         assert body["amount_to_convert"] == {"amount": "9850.00", "currency": "RUB"}
     with check:
-        assert body["rate"] == "0.4200"
+        assert body["rate"] == "0.42000000"
     with check:
         assert body["target_amount"] == {"amount": "4137.00", "currency": "THB"}
     with check:
@@ -111,7 +111,7 @@ async def test_rate_unavailable(api, freeze_rates) -> None:
 async def test_stale_rate_unavailable(api, freeze_rates, now: datetime) -> None:
     rates = {
         ("RUB", "THB"): RateData(
-            rate=Decimal("0.4200"),
+            rate=Decimal("0.42000000"),
             updated_at=datetime.fromisoformat("2026-10-01T00:00:00+00:00"),
         )
     }

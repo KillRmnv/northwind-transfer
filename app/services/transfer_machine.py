@@ -35,10 +35,19 @@ class TransferStateMachine:
     def can(self, target: str) -> bool:
         return target in EDGES.get(self.status, frozenset())
 
+    async def _previous_locked(self) -> str:
+        locked = await transfer_repo.get_transfer(
+            self._session, self._transfer.transfer_id, lock=True
+        )
+        if locked is not None:
+            await self._session.refresh(locked)
+            return locked.status
+        return self._transfer.status
+
     async def start(self, now: datetime, actor: str = "service") -> bool:
         if not self.can("PROCESSING"):
             return False
-        previous = self._transfer.status
+        previous = await self._previous_locked()
         moved = await transfer_repo.set_status_if_unsettled(
             self._session, self._transfer.transfer_id, "PROCESSING", now
         )
@@ -84,7 +93,7 @@ class TransferStateMachine:
     async def needs_review(self, now: datetime, actor: str = "service") -> bool:
         if not self.can(NEEDS_REVIEW):
             return False
-        previous = self._transfer.status
+        previous = await self._previous_locked()
         moved = await transfer_repo.set_status_if_unsettled(
             self._session, self._transfer.transfer_id, NEEDS_REVIEW, now
         )
@@ -125,18 +134,19 @@ class TransferStateMachine:
             if target == "FAILED":
                 return await self.fail(now, actor)
             return False
+        previous = await self._previous_locked()
         moved = await transfer_repo.force_status(
             self._session, self._transfer.transfer_id, target, now
         )
         if moved:
             await transfer_repo.record_transition(
-                self._session, self._transfer.transfer_id, self.status, target, actor, now
+                self._session, self._transfer.transfer_id, previous, target, actor, now
             )
             await self._session.refresh(self._transfer)
         return moved
 
     async def _settle(self, target: str, now: datetime, actor: str) -> bool:
-        previous = self._transfer.status
+        previous = await self._previous_locked()
         result = await self._session.execute(
             sa.update(Transfer)
             .where(

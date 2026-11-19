@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import DailyLimitExceededError, RateUnavailableError
+from app.core.exceptions import DailyLimitExceededError, RateUnavailableError, ValidationError
 from app.core.money import format_money
 from app.models.tables import Client, LimitDefinition
 from app.repositories.transfers import sum_day_source, sum_window_source
@@ -110,6 +110,8 @@ async def check_limit_definitions(
     flat_rates = {pair: _rate_value(rate) for pair, rate in live_rates.items()}
     flat_rates = {pair: value for pair, value in flat_rates.items() if value is not None}
     for definition in rows:
+        if definition.scope not in ("client", "direction"):
+            raise ValidationError(f"unknown limit scope {definition.scope}")
         if definition.scope == "direction" and definition.direction_id != tariff_direction_id:
             continue
         weight = Decimal(definition.weight)

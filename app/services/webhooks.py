@@ -58,7 +58,7 @@ async def handle_webhook(
         raise ValidationError(f"unknown webhook status {event.status}")
     if await session.get(WebhookEvent, event.event_id) is not None:
         return
-    await transfer_repo.store_webhook_event(
+    stored = await transfer_repo.store_webhook_event(
         session,
         event.event_id,
         provider_id,
@@ -68,6 +68,8 @@ async def handle_webhook(
         occurred_at,
         now,
     )
+    if not stored:
+        return
     await _process_event(session, settings, provider_id, event, occurred_at)
     await session.commit()
 
@@ -113,8 +115,26 @@ async def _process_event(
     if state is None:
         state = await client.find_payout(provider_id, event.reference)
     if state is None:
+        metrics_inc("webhook_unknown_payout_total")
+        logger.warning(
+            "webhook payout not found at provider",
+            extra={
+                "provider_id": provider_id,
+                "payout_id": event.payout_id,
+                "reference": event.reference,
+            },
+        )
         return
     if state is not None and state.reference and state.reference != event.reference:
+        metrics_inc("webhook_unknown_payout_total")
+        logger.warning(
+            "webhook payout reference mismatch",
+            extra={
+                "provider_id": provider_id,
+                "payout_id": event.payout_id,
+                "reference": event.reference,
+            },
+        )
         return
     if event.status == "COMPLETED":
         if state is None or state.status != "COMPLETED":

@@ -18,7 +18,7 @@ def test_quote_to_response_formats_by_minor_units() -> None:
         fee_amount=Decimal("150.00"),
         fee_currency="RUB",
         amount_to_convert=Decimal("9850.00"),
-        rate=Decimal("0.4200"),
+        rate=Decimal("0.42000000"),
         target_amount=Decimal("4137.00"),
         target_currency="THB",
         breakdown=["step"],
@@ -31,7 +31,7 @@ def test_quote_to_response_formats_by_minor_units() -> None:
     with check:
         assert response.target_amount == Money(amount="4137.00", currency="THB")
     with check:
-        assert response.rate == "0.4200"
+        assert response.rate == "0.42000000"
     with check:
         assert response.breakdown == ["step"]
 

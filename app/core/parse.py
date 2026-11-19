@@ -5,6 +5,15 @@ from decimal import Decimal, InvalidOperation
 from app.core.exceptions import ValidationError
 
 
+def try_parse_uuid(value: object) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        return None
+
+
 def parse_uuid(value: object, field: str) -> uuid.UUID:
     if isinstance(value, uuid.UUID):
         return value

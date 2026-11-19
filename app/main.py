@@ -29,33 +29,52 @@ logger = logging.getLogger("transfer-core.reconcile")
 access_logger = logging.getLogger("transfer-core.http")
 
 
+async def _reconcile_pass(list_open_transfers, reconcile_transfer) -> None:
+    async with session_factory() as session:
+        pending = await list_open_transfers(session)
+    semaphore = asyncio.Semaphore(8)
+
+    async def run_one(transfer_id, sem=semaphore) -> dict:
+        async with sem, session_factory() as session:
+            transfer = await transfer_repo.get_transfer(session, transfer_id)
+            if transfer is None:
+                return {}
+            stats = await reconcile_transfer(session, settings, transfer, now_utc())
+            await session.commit()
+            return stats
+
+    batches = await asyncio.gather(
+        *[run_one(item.transfer_id) for item in pending], return_exceptions=True
+    )
+    total = {"checked": 0, "completed": 0, "failed": 0, "still_open": 0}
+    for batch in batches:
+        if isinstance(batch, dict):
+            for key in total:
+                total[key] += batch.get(key, 0)
+    logger.info("reconcile pass", extra={"status": total})
+
+
 async def reconcile_loop() -> None:
-    from app.services.reconcile import list_open_transfers, reconcile_transfer
+    from app.services.reconcile import (
+        list_open_transfers,
+        reconcile_transfer,
+        release_reconcile_lock,
+        try_reconcile_lock,
+    )
 
     while True:
         try:
-            async with session_factory() as session:
-                pending = await list_open_transfers(session)
-            semaphore = asyncio.Semaphore(8)
-
-            async def run_one(transfer_id, sem=semaphore) -> dict:
-                async with sem, session_factory() as session:
-                    transfer = await transfer_repo.get_transfer(session, transfer_id)
-                    if transfer is None:
-                        return {}
-                    stats = await reconcile_transfer(session, settings, transfer, now_utc())
-                    await session.commit()
-                    return stats
-
-            batches = await asyncio.gather(
-                *[run_one(item.transfer_id) for item in pending], return_exceptions=True
-            )
-            total = {"checked": 0, "completed": 0, "failed": 0, "still_open": 0}
-            for batch in batches:
-                if isinstance(batch, dict):
-                    for key in total:
-                        total[key] += batch.get(key, 0)
-            logger.info("reconcile pass", extra={"status": total})
+            async with session_factory() as lock_session:
+                if not await try_reconcile_lock(lock_session):
+                    logger.info("reconcile pass skipped: lock held by another runner")
+                    await lock_session.commit()
+                    continue
+                await lock_session.commit()
+                try:
+                    await _reconcile_pass(list_open_transfers, reconcile_transfer)
+                finally:
+                    await release_reconcile_lock(lock_session)
+                    await lock_session.commit()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -25,12 +25,12 @@ Swagger — `http://localhost:8080/docs` в `ENV=dev`; в других проф�
 
 ```sh
 uv sync --frozen
-uv run alembic upgrade head
-uv run python -m app.db.seed
-uv run uvicorn app.main:app --port 8080
+DB_HOST=localhost DB_PORT=5433 uv run alembic upgrade head
+DB_HOST=localhost DB_PORT=5433 uv run python -m app.db.seed
+DB_HOST=localhost DB_PORT=5433 uv run uvicorn app.main:app --port 8080
 ```
 
-Только `uv`: `pip`, `venv` и `requirements.txt` не используются. Python закреплён в `.python-version` (3.12).
+С хоста база доступна через опубликованный порт (`DB_PORT_HOST`, по умолчанию `5433`); значения по умолчанию в `.env.example` (`DB_HOST=db`) рассчитаны на запуск внутри compose-сети. Только `uv`: `pip`, `venv` и `requirements.txt` не используются. Python закреплён в `.python-version` (3.12).
 
 ## Тесты
 
@@ -119,8 +119,8 @@ docker compose run --rm -e DB_HOST=db -e DB_PORT=5432 --entrypoint sh api \
 | `AMOUNT_OUT_OF_LIMITS` | 422 | `FAILED` | следующий провайдер |
 | `CURRENCY_NOT_SUPPORTED` | 422 | `FAILED` | следующий провайдер |
 | `PROVIDER_DISABLED`, `PROVIDER_MAINTENANCE` | 503 | `FAILED` (`PROVIDER_UNAVAILABLE`) | следующий провайдер; такие провайдеры заранее отсекаются фильтром доступности |
-| `INTERNAL_ERROR` | 500 | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: повторный опрос, затем следующий провайдер |
-| `GATEWAY_TIMEOUT`, обрыв соединения, таймаут | 504 / нет ответа | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: `GET ?reference=`, затем следующий провайдер |
+| `INTERNAL_ERROR` | 500 | `FAILED` (`PROVIDER_UNREACHABLE`) | следующий провайдер сразу: повторные опросы `GET ?reference=` в пределах окна видимости записи не нашли — считается, что запись не создана; нечитаемый провайдер (ошибки проб) — `NEEDS_REVIEW` |
+| `GATEWAY_TIMEOUT`, обрыв соединения, таймаут | 504 / нет ответа | `FAILED` (`PROVIDER_UNREACHABLE`), если опросы `GET ?reference=` в окне видимости ничего не нашли, иначе `NEEDS_REVIEW` | следующий провайдер или сверка — по итогу опросов |
 | `IDEMPOTENCY_KEY_REUSED` | 409 | `PROCESSING` с пометкой `NEEDS_REVIEW` | сверка: `GET ?reference=`, затем следующий провайдер |
 
 ## Документация
@@ -129,7 +129,7 @@ docker compose run --rm -e DB_HOST=db -e DB_PORT=5432 --entrypoint sh api \
 - `docs/ASSUMPTIONS.md` — неоднозначности и как разрешены.
 - `docs/LIMITS.md` — границы решения.
 - `docs/starter-notes.md` — данные, мок-провайдер, хаос.
-- `docs/test-cases/` — перенесённые из Java-референса сценарии.
+- `docs/test-cases/` — переносимые сценарии приёмочных проверок.
 - `docs/er_diagram.puml` + `er_diagram.svg` — схема БД.
 
 ## Логи

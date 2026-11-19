@@ -86,7 +86,7 @@ def check_result(result: service.QuoteResult, expected: dict, minor: dict[str, i
             == expected["amount_to_convert"]["amount"]
         )
     with check:
-        assert f"{result.rate:.4f}" == expected["rate"]
+        assert Decimal(result.rate) == Decimal(expected["rate"])
     with check:
         assert (
             format_money(result.target_amount, minor[result.target_currency])
