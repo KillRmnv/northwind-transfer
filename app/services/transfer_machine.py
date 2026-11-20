@@ -31,12 +31,15 @@ class TransferStateMachine:
 
     @property
     def status(self) -> str:
+        """Текущий статус из памяти объекта."""
         return self._transfer.status
 
     def can(self, target: str) -> bool:
+        """Чистая проверка ребра графа без побочных эффектов."""
         return target in EDGES.get(self.status, frozenset())
 
     async def _previous_locked(self) -> str:
+        """Свежий статус строки под FOR UPDATE: защита от устаревшей памяти."""
         locked = await transfer_repo.get_transfer(
             self._session, self._transfer.transfer_id, lock=True
         )
@@ -46,6 +49,7 @@ class TransferStateMachine:
         return self._transfer.status
 
     async def _move_unsettled(self, target: str, now: datetime, actor: str) -> bool:
+        """Переход без движения денег одним атомарным UPDATE."""
         if not self.can(target):
             return False
         previous = await self._previous_locked()
@@ -60,6 +64,7 @@ class TransferStateMachine:
         return moved
 
     async def _settle_with_effect(self, target, now, actor, make_effect) -> bool:
+        """Терминал с движением денег: сначала settle-флаг, потом эффект."""
         if not self.can(target):
             return False
         settled = await self._settle(target, now, actor)
@@ -71,6 +76,7 @@ class TransferStateMachine:
         return True
 
     def _release_effect(self):
+        """Отложенный возврат резерва в доступно."""
         return partial(
             balance_repo.release_reserve,
             self._session,
@@ -80,6 +86,7 @@ class TransferStateMachine:
         )
 
     def _consume_effect(self):
+        """Отложенное списание резерва в spent."""
         return partial(
             balance_repo.consume_reserve,
             self._session,
@@ -89,20 +96,25 @@ class TransferStateMachine:
         )
 
     async def start(self, now: datetime, actor: str = "service") -> bool:
+        """Первая живая попытка: перевод уходит в обработку."""
         return await self._move_unsettled("PROCESSING", now, actor)
 
     async def complete(self, now: datetime, actor: str = "service") -> bool:
+        """Подтверждённый успех: резерв списывается, попытка синхронна."""
         return await self._settle_with_effect("COMPLETED", now, actor, self._consume_effect)
 
     async def fail(self, now: datetime, actor: str = "service") -> bool:
+        """Окончательный отказ: резерв возвращается, попытка синхронна."""
         return await self._settle_with_effect("FAILED", now, actor, self._release_effect)
 
     async def needs_review(self, now: datetime, actor: str = "service") -> bool:
+        """Неподтверждённый итог: деньги остаются в резерве."""
         return await self._move_unsettled(NEEDS_REVIEW, now, actor)
 
     async def settle_from_payout(
         self, payout_status: str, now: datetime, actor: str = "service"
     ) -> str:
+        """Исход выплаты мока: завершить, ретраить или ждать."""
         if self._transfer.status in TERMINAL:
             return self._transfer.status
         action = PAYOUT_SETTLEMENT.get(payout_status, "wait")
@@ -116,6 +128,7 @@ class TransferStateMachine:
         return "PROCESSING"
 
     async def repair(self, target: str, now: datetime, actor: str = "service") -> bool:
+        """Дотягивание зависшего перевода до терминала сверкой."""
         await self._session.refresh(self._transfer)
         if self.status in TERMINAL:
             return False
@@ -137,6 +150,7 @@ class TransferStateMachine:
         return moved
 
     async def _settle(self, target: str, now: datetime, actor: str) -> bool:
+        """Атомарный захват денег: строка меняется один раз и навсегда."""
         previous = await self._previous_locked()
         result = await self._session.execute(
             sa.update(Transfer)
@@ -155,6 +169,7 @@ class TransferStateMachine:
         return True
 
     async def _sync_attempt(self, status: str, now: datetime) -> None:
+        """Статус попытки догоняет статус перевода."""
         attempts = await transfer_repo.latest_attempts(self._session, self._transfer.transfer_id)
         if not attempts:
             return

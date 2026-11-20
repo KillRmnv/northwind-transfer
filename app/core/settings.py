@@ -1,3 +1,4 @@
+from pydantic import PositiveFloat
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
 
     mock_provider_url: str = "http://mock-provider:9000"
     mock_provider_timeout_sec: float = 5.0
+    provider_probe_delay_sec: PositiveFloat = PositiveFloat(2.0)
+    provider_visibility_grace_sec: int = 30
 
     provider_webhook_secret: str = ""
 

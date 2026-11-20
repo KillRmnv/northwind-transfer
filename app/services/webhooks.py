@@ -26,6 +26,7 @@ EVENT_ADAPTER: TypeAdapter[WebhookEventSchema] = TypeAdapter(WebhookEventSchema)
 
 
 def verify_signature(secret: str, body: bytes, signature: str | None) -> bool:
+    """HMAC-подпись тела вебхука секретом провайдера."""
     if not signature:
         return False
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -40,6 +41,7 @@ async def handle_webhook(
     signature: str | None,
     now: datetime,
 ) -> None:
+    """Приём события: секрет, подпись, дедуп, затем обработка."""
     if not settings.provider_webhook_secret:
         raise ServiceUnavailableError("webhook secret is not configured")
     if not verify_signature(settings.provider_webhook_secret, body, signature):
@@ -81,6 +83,7 @@ async def _process_event(
     event: WebhookEventSchema,
     occurred_at: datetime,
 ) -> None:
+    """Одно событие: монотонность, своя выплата, подтверждение, исход."""
     transfer = await transfer_repo.get_transfer_by_reference(session, event.reference)
     if transfer is None:
         metrics_inc("webhook_unknown_reference_total")

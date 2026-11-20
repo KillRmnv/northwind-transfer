@@ -21,6 +21,7 @@ from app.repositories.balances import for_update
 
 
 def body_hash(body: dict) -> str:
+    """Хеш тела заявки для сверки повторного ключа."""
     canonical = "|".join(f"{key}={body.get(key)}" for key in sorted(body))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -28,6 +29,7 @@ def body_hash(body: dict) -> str:
 async def get_transfer(
     session: AsyncSession, transfer_id: uuid.UUID, lock: bool = False
 ) -> Transfer | None:
+    """Перевод по id; lock держит строку на время решения."""
     query = sa.select(Transfer).where(Transfer.transfer_id == transfer_id)
     if lock:
         query = for_update(query, session)
@@ -35,6 +37,7 @@ async def get_transfer(
 
 
 async def lock_client(session: AsyncSession, client_id: str):
+    """Клиент под FOR UPDATE: сериализация конкурентных заявок."""
     query = sa.select(Client).where(Client.client_id == client_id)
     return (await session.execute(for_update(query, session))).scalar_one_or_none()
 
@@ -47,6 +50,7 @@ async def record_transition(
     actor: str,
     now: datetime,
 ) -> None:
+    """Строка истории: кто, когда, откуда и куда."""
     session.add(
         TransferStatusHistory(
             transfer_id=transfer_id,
@@ -60,6 +64,7 @@ async def record_transition(
 
 
 async def history_for_transfer(session: AsyncSession, transfer_id) -> list:
+    """История переводов по времени для ответа API."""
     query = (
         sa.select(TransferStatusHistory)
         .where(TransferStatusHistory.transfer_id == transfer_id)
@@ -69,6 +74,7 @@ async def history_for_transfer(session: AsyncSession, transfer_id) -> list:
 
 
 async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Transfer | None:
+    """Перевод по reference мока; мусор мимо."""
     transfer_id = try_parse_uuid(reference)
     if transfer_id is None:
         return None
@@ -78,6 +84,7 @@ async def get_transfer_by_reference(session: AsyncSession, reference: str) -> Tr
 async def get_by_idempotency_key(
     session: AsyncSession, key: str, client_id: str | None = None
 ) -> Transfer | None:
+    """Поиск дубля по ключу в пределах клиента."""
     query = sa.select(Transfer).where(Transfer.idempotency_key == key)
     if client_id is not None:
         query = query.where(Transfer.client_id == client_id)
@@ -93,6 +100,7 @@ async def create_transfer_or_existing(
     idempotency_hash: str,
     now: datetime,
 ) -> tuple[Transfer, bool]:
+    """Вставка перевода или победа чужой транзакции: уникальный ключ решает гонку."""
     try:
         async with session.begin_nested():
             row = Transfer(
@@ -125,6 +133,7 @@ async def create_transfer_or_existing(
 
 
 async def force_status(session: AsyncSession, transfer_id, status: str, now: datetime) -> bool:
+    """Принудительный статус мимо обычных правил: только починка."""
     result = await session.execute(
         sa.update(Transfer)
         .where(
@@ -139,6 +148,7 @@ async def force_status(session: AsyncSession, transfer_id, status: str, now: dat
 async def set_status_if_unsettled(
     session: AsyncSession, transfer_id, status: str, now: datetime
 ) -> bool:
+    """Смена статуса, если деньги ещё не осели."""
     result = await session.execute(
         sa.update(Transfer)
         .where(
@@ -154,6 +164,7 @@ async def set_status_if_unsettled(
 async def list_open_transfers(
     session: AsyncSession, limit: int = 100, skip_locked: bool = False
 ) -> list[Transfer]:
+    """Открытые переводы для сверки, старейшие вперёд."""
     query = (
         sa.select(Transfer)
         .where(Transfer.status.in_(["PENDING", "PROCESSING", "NEEDS_REVIEW"]))
@@ -172,6 +183,7 @@ async def sum_day_source(
     day_start: datetime,
     day_end: datetime,
 ) -> list[tuple[Decimal, str, Decimal, str, str]]:
+    """Строки дневного окна для лимита."""
     transfer_alias = Transfer.__table__
     quote_alias = Quote.__table__
     query = (
@@ -200,6 +212,7 @@ async def sum_window_source(
     direction_id: str | None,
     window_start: datetime,
 ) -> list[tuple[Decimal, str, Decimal, str]]:
+    """Строки скользящего окна, опционально по направлению."""
     transfer_alias = Transfer.__table__
     quote_alias = Quote.__table__
     query = (
@@ -235,6 +248,7 @@ async def record_attempt(
     payout_id: str | None,
     now: datetime,
 ) -> PayoutAttempt:
+    """Попытка выплаты с номером; гонка номеров разруливается."""
     try:
         async with session.begin_nested():
             row = PayoutAttempt(
@@ -285,6 +299,7 @@ async def update_attempt(
     payout_id: str | None,
     now: datetime,
 ) -> None:
+    """Новый статус попытки от провайдера."""
     attempt.status = status
     attempt.failure_code = failure_code
     if payout_id is not None:
@@ -294,6 +309,7 @@ async def update_attempt(
 
 
 async def latest_attempts(session: AsyncSession, transfer_id) -> list[PayoutAttempt]:
+    """Попытки перевода по порядку номеров."""
     query = (
         sa.select(PayoutAttempt)
         .where(PayoutAttempt.transfer_id == transfer_id)
@@ -305,6 +321,7 @@ async def latest_attempts(session: AsyncSession, transfer_id) -> list[PayoutAtte
 async def find_attempt_by_payout(
     session: AsyncSession, provider_id: str, payout_id: str
 ) -> PayoutAttempt | None:
+    """Попытка по выплате провайдера для вебхука."""
     query = sa.select(PayoutAttempt).where(
         PayoutAttempt.provider_id == provider_id,
         PayoutAttempt.payout_id == payout_id,
@@ -322,6 +339,7 @@ async def store_webhook_event(
     occurred_at: datetime,
     now: datetime,
 ) -> bool:
+    """Сохранение вебхука: False означает дубль, обрабатывать нечего."""
     existing = await session.get(WebhookEvent, event_id)
     if existing is not None:
         return False
@@ -345,6 +363,7 @@ async def store_webhook_event(
 
 
 async def webhook_events_for_transfer(session: AsyncSession, reference: str) -> list[WebhookEvent]:
+    """События перевода по времени для монотонности."""
     query = (
         sa.select(WebhookEvent)
         .where(WebhookEvent.reference == reference)

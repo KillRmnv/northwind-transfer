@@ -29,6 +29,7 @@ RATE_STALE_AFTER_HOURS = 6
 def filter_fresh_rates(
     rates: dict[tuple[str, str], RateData], now: datetime
 ) -> dict[tuple[str, str], Decimal]:
+    """Только свежие пары: протухшие отбрасываются, а не подменяются."""
     limit_sec = RATE_STALE_AFTER_HOURS * 3600
     return {
         pair: data.rate
@@ -45,6 +46,7 @@ def find_direction(
     target_currency: str,
     payout_method: str,
 ) -> TariffData:
+    """Направление по странам, валютам и способу выплаты."""
     for tariff in tariffs:
         if (
             tariff.source_country == source_country
@@ -61,6 +63,7 @@ def find_direction(
 
 
 def find_tariff(tariffs: list[TariffData], direction_id: str) -> TariffData:
+    """Тариф по id направления."""
     for tariff in tariffs:
         if tariff.direction_id == direction_id:
             return tariff
@@ -75,6 +78,7 @@ def resolve_rate(
     ttl_sec: int,
     minor_units: dict[str, int],
 ) -> Decimal:
+    """Курс: прямой, обратный или кросс; протухший — RATE_UNAVAILABLE."""
     if source_currency == target_currency:
         return Decimal("1")
     limit_sec = min(ttl_sec, RATE_STALE_AFTER_HOURS * 3600)
@@ -109,31 +113,39 @@ def resolve_rate(
 
 
 def _valid_rate(rate: Decimal) -> bool:
+    """Курс пригоден к расчёту: конечный и положительный."""
     return rate.is_finite() and rate > 0
 
 
 def _fresh(data: RateData, now: datetime, limit_sec: int) -> bool:
+    """Свежесть курса: в пределах лимита и без сильного ухода в будущее."""
     age_sec = (now - data.updated_at).total_seconds()
     return -60 <= age_sec <= limit_sec
 
 
 def _quant(value: Decimal, currency: str, minor_units: dict[str, int]) -> Decimal:
+    """Округление суммы по minor_units валюты."""
     return round_money(value, minor_units[currency])
 
 
 class Breakdown:
+    """Трассировка расчёта: шаги строкой для аудита в ответе."""
+
     def __init__(self) -> None:
         self._lines: list[str] = []
 
     def add(self, text: str) -> "Breakdown":
+        """Шаг трассировки; возвращает себя для цепочки."""
         self._lines.append(text)
         return self
 
     def extend(self, lines: list[str]) -> "Breakdown":
+        """Чужие шаги в конец; возвращает себя для цепочки."""
         self._lines.extend(lines)
         return self
 
     def build(self) -> list[str]:
+        """Готовая трассировка копией: билдер можно переиспользовать."""
         return list(self._lines)
 
 
@@ -143,6 +155,7 @@ def calculate_source(
     rate: Decimal,
     minor_units: dict[str, int],
 ) -> QuoteResult:
+    """Расчёт от суммы отправки: комиссия, конвертация, получение."""
     src, tgt = tariff.source_currency, tariff.target_currency
     charged_in_source = tariff.fee_charged_in == "SOURCE"
     fee_currency = src if charged_in_source else tgt
@@ -208,6 +221,7 @@ def _converge_forward(
     target_amount: Decimal,
     trace: Breakdown,
 ) -> QuoteResult:
+    """Дотягивание суммы прямым пересчётом до целевой, максимум 10 шагов."""
     forward = calculate_source(source, tariff, rate, minor_units)
     for _ in range(10):
         if forward.target_amount >= target_amount:
@@ -237,6 +251,7 @@ def calculate_target(
     rate: Decimal,
     minor_units: dict[str, int],
 ) -> QuoteResult:
+    """Инверсия: подбор суммы отправки под целевой результат."""
     src, tgt = tariff.source_currency, tariff.target_currency
     charged_in_source = tariff.fee_charged_in == "SOURCE"
     trace = Breakdown().add(
@@ -272,6 +287,7 @@ def check_limits(
     tariff: TariffData,
     minor_units: dict[str, int],
 ) -> None:
+    """Сумма в пределах min/max направления в валюте лимита."""
     if amount_in_limit_currency < tariff.min_amount:
         min_formatted = format_money(tariff.min_amount, minor_units[tariff.limit_currency])
         raise AmountBelowMinError(
@@ -291,6 +307,7 @@ def amount_in_limit_currency(
     tariff: TariffData,
     rate: Decimal,
 ) -> Decimal | None:
+    """Сумма в валюте лимита; None — пересчитать нечем."""
     if amount.currency == tariff.limit_currency:
         return amount.amount
     if not _valid_rate(rate):

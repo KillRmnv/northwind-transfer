@@ -1,4 +1,5 @@
 import asyncio
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -57,7 +58,14 @@ class RetryPolicy:
 
 
 SHORT_PROBE = RetryPolicy(attempts=1, delay=timedelta(seconds=1))
-FINAL_PROBE = RetryPolicy(attempts=4, delay=timedelta(seconds=2))
+
+
+def final_probe_policy(settings: Settings) -> RetryPolicy:
+    """Окно финальных проб из настроек: grace обязана превышать лаг видимости провайдера."""
+    grace = settings.provider_visibility_grace_sec
+    delay = settings.provider_probe_delay_sec
+    attempts = max(1, math.ceil(grace / delay))
+    return RetryPolicy(attempts=attempts, delay=timedelta(seconds=delay))
 
 
 async def probe_with_retries(
@@ -66,6 +74,7 @@ async def probe_with_retries(
     reference: str,
     policy: RetryPolicy,
 ) -> tuple[str, "PayoutState | None"]:
+    """Опрашивает выплату до первого итога: найдена, точно нет или провайдер нечитаем."""
     for _ in range(policy.attempts):
         await asyncio.sleep(policy.delay.total_seconds())
         outcome, state = await client.probe_payout(provider_id, reference)
@@ -78,15 +87,18 @@ async def probe_with_retries(
 
 
 def reference_for(transfer_id: uuid.UUID) -> str:
+    """Детерминированный reference перевода: hex его id."""
     return transfer_id.hex
 
 
 def provider_key(reference: str, provider_id: str) -> str:
+    """Ключ идемпотентности у провайдера: пара reference и провайдер."""
     return f"{reference}:{provider_id}"
 
 
 async def create_with_recovery(
     client: ProviderClient,
+    settings: Settings,
     provider_id: str,
     reference: str,
     amount: str,
@@ -95,6 +107,7 @@ async def create_with_recovery(
     callback_url: str,
     idempotency_key: str,
 ) -> AttemptDecision:
+    """Выплата с восстановлением: повтор тем же ключом и опросы вместо слепого ретрая."""
     outcome = await client.create_payout(
         provider_id,
         reference,
@@ -147,7 +160,9 @@ async def create_with_recovery(
             )
         if isinstance(retry, Declined):
             return AttemptDecision(AttemptAction.FAIL_AND_NEXT, failure_code=retry.failure_code)
-    outcome, found = await probe_with_retries(client, provider_id, reference, FINAL_PROBE)
+    outcome, found = await probe_with_retries(
+        client, provider_id, reference, final_probe_policy(settings)
+    )
     if found is not None:
         return _adopt_or_fail(found)
     if outcome is ProbeOutcome.ERROR:
@@ -156,6 +171,7 @@ async def create_with_recovery(
 
 
 def _adopt_or_fail(found: PayoutState) -> AttemptDecision:
+    """Найденная опросом выплата: привязать живую, следующей — закрыть мёртвую."""
     if found.status == "FAILED":
         return AttemptDecision(
             AttemptAction.FAIL_AND_NEXT,
@@ -178,6 +194,7 @@ async def _probe_pending(
     reference: str,
     attempts: list,
 ) -> list:
+    """Опрос неподтверждённых попыток: привязать найденные, протухшие закрыть."""
     for pending in [a for a in attempts if a.status == "PROCESSING" and not a.payout_id]:
         outcome, state = await client.probe_payout(pending.provider_id, reference)
         probed_at = now_utc()
@@ -199,6 +216,7 @@ async def _probe_pending(
 
 
 def _young_unconfirmed(attempts: list) -> list:
+    """Молодые неподтверждённые попытки: перебор запрещён, ждать проб."""
     moment = now_utc()
     return [
         a
@@ -218,6 +236,7 @@ async def _settle_expired(
     now: datetime,
     actor: str,
 ) -> str:
+    """Истёкшая котировка: сначала пробы, терминал только по подтверждённому итогу."""
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     attempts = await _probe_pending(session, client, transfer.transfer_id, reference, attempts)
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
@@ -246,16 +265,19 @@ async def _settle_expired(
 
 
 async def live_rates_map(settings: Settings) -> dict[tuple[str, str], RateData]:
+    """Живые курсы мока одной картой base/quote."""
     return await RatesClient(settings.mock_provider_url, settings.mock_provider_timeout_sec).fetch()
 
 
 def simple_rates(
     rates: dict[tuple[str, str], RateData], now: datetime
 ) -> dict[tuple[str, str], Decimal]:
+    """Только свежие курсы: протухшие отбрасываются, а не подменяются."""
     return filter_fresh_rates(rates, now)
 
 
 def _fee_in_source(fee: Money, source: Money, target_currency: str, rate: Decimal | None) -> Money:
+    """Комиссия клиента в валюте источника для расчёта маржи."""
     if fee.currency == source.currency:
         return fee
     if not rate:
@@ -275,6 +297,7 @@ async def select_providers(
     simple: dict[tuple[str, str], Decimal],
     now: datetime,
 ) -> list[ScoredProvider]:
+    """Конвейер отбора: направление, лимиты, доступность, скоринг."""
     providers = await load_providers(session)
     candidates = filter_direction(providers, direction_id)
     candidates = filter_limits(candidates, target, simple)
@@ -292,6 +315,7 @@ async def select_providers(
 async def _find_existing(
     session: AsyncSession, idempotency_key: str, client_id: str, digest: str
 ) -> Transfer | None:
+    """Повтор по ключу идемпотентности: тот же перевод или конфликт тела."""
     existing = await transfer_repo.get_by_idempotency_key(session, idempotency_key, client_id)
     if existing is not None and existing.idempotency_hash != digest:
         raise IdempotencyConflictError(idempotency_key)
@@ -307,6 +331,7 @@ async def create_transfer(
     idempotency_key: str,
     now: datetime,
 ) -> tuple:
+    """Резервирует деньги и создаёт перевод: проверки, лимиты, резерв, вставка."""
 
     minor_units = await load_minor_units(session)
     body = {
@@ -384,6 +409,7 @@ async def run_attempts_locked(
     now: datetime,
     actor: str = "service",
 ) -> str:
+    """Перебор провайдеров под замком перевода: один процесс доводит перевод."""
     async with transfer_lock(f"tx:{transfer_id}"):
         return await run_attempts(session, settings, transfer_id, now, actor)
 
@@ -395,6 +421,7 @@ async def run_attempts(
     now: datetime,
     actor: str = "service",
 ) -> str:
+    """Исполнение перевода: пробы, живые выплаты, перебор провайдеров до терминала."""
     minor_units = await load_minor_units(session)
     rates = await live_rates_map(settings)
     simple = simple_rates(rates, now)
@@ -491,6 +518,7 @@ async def run_attempts(
         await session.commit()
         decision = await create_with_recovery(
             client,
+            settings,
             provider.provider_id,
             reference,
             target_str,
@@ -558,6 +586,7 @@ async def wait_for_settlement(
     poll_interval: timedelta = timedelta(milliseconds=500),
     actor: str = "service",
 ) -> str:
+    """Ожидание сеттлмента живой выплаты до синхронного дедлайна."""
     deadline: datetime | None = None
     now = started
     while True:

@@ -23,14 +23,17 @@ W_LATENCY_MS = Decimal("1000")
 
 
 def filter_direction(providers: list[ProviderInfo], direction_id: str) -> list[ProviderInfo]:
+    """Оставляет провайдеров, обслуживающих направление."""
     return [p for p in providers if direction_id in p.directions]
 
 
 def in_maintenance(provider: ProviderInfo, now: datetime) -> bool:
+    """Провайдер внутри окна обслуживания."""
     return any(window.from_at <= now < window.to_at for window in provider.windows)
 
 
 def filter_availability(providers: list[ProviderInfo], now: datetime) -> list[ProviderInfo]:
+    """Только включённые и вне обслуживания."""
     return [p for p in providers if p.enabled and not in_maintenance(p, now)]
 
 
@@ -41,6 +44,7 @@ def convert_amount(
     rates: dict[tuple[str, str], Decimal],
     max_hops: int = 3,
 ) -> Decimal | None:
+    """Конвертация поиском пути по графу курсов, до трёх рёбер."""
     if source_currency == target_currency:
         return amount
     graph: dict[str, list[tuple[str, Decimal]]] = {}
@@ -69,12 +73,14 @@ def convert_amount(
 def convert_money(
     source: Money, target_currency: str, rates: dict[tuple[str, str], Decimal]
 ) -> Decimal | None:
+    """То же для Money: сумма или None, если путь не строится."""
     return convert_amount(source.amount, source.currency, target_currency, rates)
 
 
 def convert_or_raise(
     source: Money, target_currency: str, rates: dict[tuple[str, str], Decimal]
 ) -> Decimal:
+    """Конвертация или RATE_UNAVAILABLE: молчаливого пропуска нет."""
     converted = convert_money(source, target_currency, rates)
     if converted is None:
         raise RateUnavailableError(f"cannot convert {source.currency} to {target_currency}")
@@ -87,6 +93,7 @@ def provider_fee_in_source(
     source_currency: str,
     rates: dict[tuple[str, str], Decimal],
 ) -> Money | None:
+    """Комиссия провайдера в валюте источника для сравнения с комиссией клиента."""
 
     amount_in_provider = convert_amount(target.amount, target.currency, provider.currency, rates)
     if amount_in_provider is None:
@@ -105,6 +112,7 @@ def filter_limits(
     target: Money,
     rates: dict[tuple[str, str], Decimal],
 ) -> list[ProviderInfo]:
+    """Отсекает провайдеров, чья сумма вне его min/max."""
     kept = []
     for provider in providers:
         converted = convert_amount(target.amount, target.currency, provider.currency, rates)
@@ -124,6 +132,7 @@ def score_providers(
     rates: dict[tuple[str, str], Decimal],
     min_margin_percent: Decimal,
 ) -> list[ScoredProvider]:
+    """Взвешенный выбор: маржа, надёжность, штраф за задержку."""
     scored = []
     for provider in providers:
         fee_source = provider_fee_in_source(provider, target, source.currency, rates)
@@ -145,6 +154,7 @@ def score_providers(
 
 
 def _classify_create(status_code: int | None, payload: object) -> CreateOutcome:
+    """Ответ мока в исход попытки: принять, отказать или разбираться дальше."""
     if status_code is None:
         return UnknownResult(reason="transport error")
     if status_code == 201 and isinstance(payload, dict) and payload.get("payout_id"):
@@ -174,6 +184,7 @@ class ProviderClient:
         self._scenario = scenario
 
     def _client(self) -> httpx.AsyncClient:
+        """HTTP-клиент с таймаутом провайдера."""
         return httpx.AsyncClient(timeout=self._timeout)
 
     async def create_payout(
@@ -186,6 +197,7 @@ class ProviderClient:
         callback_url: str,
         idempotency_key: str,
     ) -> CreateOutcome:
+        """Создаёт выплату и классифицирует ответ мока в исход попытки."""
         headers = {"Idempotency-Key": idempotency_key}
         if self._scenario is not None:
             headers["X-Scenario"] = self._scenario
@@ -207,6 +219,7 @@ class ProviderClient:
         return _classify_create(status_code, payload)
 
     async def get_payout(self, provider_id: str, payout_id: str) -> PayoutState | None:
+        """Статус выплаты по payout_id; None — спросить иначе."""
         async with self._client() as client:
             status_code, payload = await get_json(
                 client, "GET", f"{self._base_url}/{provider_id}/payouts/{payout_id}"
@@ -216,12 +229,14 @@ class ProviderClient:
         return _parse_state(payload)
 
     async def find_payout(self, provider_id: str, reference: str) -> PayoutState | None:
+        """Поиск выплаты по reference; None — записи нет."""
         outcome, state = await self.probe_payout(provider_id, reference)
         return state if outcome is ProbeOutcome.FOUND else None
 
     async def probe_payout(
         self, provider_id: str, reference: str
     ) -> tuple[ProbeOutcome, PayoutState | None]:
+        """Зонд записи: найдена, точно нет или провайдер нечитаем."""
         async with self._client() as client:
             status_code, payload = await get_json(
                 client,
@@ -244,6 +259,7 @@ ALLOWED_PAYOUT_STATUSES = frozenset({"PROCESSING", "COMPLETED", "FAILED"})
 async def confirm_payout(
     client: ProviderClient, provider_id: str, payout_id: str, reference: str
 ) -> PayoutState | None:
+    """Подтверждение выплаты: прямое чтение, затем поиск по reference."""
     state = await client.get_payout(provider_id, payout_id)
     if state is None:
         state = await client.find_payout(provider_id, reference)
@@ -253,6 +269,7 @@ async def confirm_payout(
 
 
 def _parse_state(payload: dict) -> PayoutState:
+    """Разбор статуса мока; неизвестный статус считается PROCESSING."""
     status = str(payload.get("status", "PROCESSING"))
     if status not in ALLOWED_PAYOUT_STATUSES:
         status = "PROCESSING"

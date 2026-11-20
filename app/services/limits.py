@@ -14,6 +14,7 @@ from app.services.providers import convert_or_raise
 
 
 def day_bounds(now: datetime) -> tuple[datetime, datetime]:
+    """Границы календарных суток UTC для дневного лимита."""
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return start, start + timedelta(days=1)
 
@@ -25,6 +26,7 @@ def to_limit_currency(
     quote_source: str,
     quote_target: str,
 ) -> Decimal | None:
+    """Сумма в валюте лимита через курс котировки; None — нужна конвертация."""
     if amount.currency == limit_currency:
         return amount.amount
     if quote_rate is None or quote_rate == 0:
@@ -45,6 +47,7 @@ def convert_entry_or_raise(
     quote_target: str,
     flat_rates: dict[tuple[str, str], Decimal],
 ) -> Decimal:
+    """Сумма в валюте лимита любым путём или RATE_UNAVAILABLE."""
     converted = to_limit_currency(
         Money(amount, amount_currency),
         target_currency,
@@ -58,19 +61,23 @@ def convert_entry_or_raise(
 
 
 def _minutes_window(now: datetime, window_days: int | None) -> datetime | None:
+    """Окно последних N минут; минуты лежат в window_days."""
     return now - timedelta(minutes=int(window_days or 1))
 
 
 def _hourly_window(now: datetime, window_days: int | None) -> datetime | None:
+    """Окно последнего часа."""
     return now - timedelta(hours=1)
 
 
 def _daily_window(now: datetime, window_days: int | None) -> datetime | None:
+    """Окно с полуночи UTC."""
     start, _ = day_bounds(now)
     return start
 
 
 def _window_n_window(now: datetime, window_days: int | None) -> datetime | None:
+    """Окно последних N дней; мусор в настройке — пропуск правила."""
     if not window_days or int(window_days) <= 0:
         return None
     return now - timedelta(days=int(window_days))
@@ -95,6 +102,7 @@ async def check_daily_limit(
     now: datetime,
     live_rates: dict[tuple[str, str], Decimal] | None = None,
 ) -> None:
+    """Суточный лимит клиента: учтены резервы, а не только финалы."""
     client = await session.get(Client, client_id)
     if client is None:
         return
@@ -134,6 +142,7 @@ async def check_limit_definitions(
     live_rates: dict[tuple[str, str], Decimal],
     now: datetime,
 ) -> None:
+    """Оконные лимиты из определений: вес, направление, fail-closed."""
     rows = (
         (
             await session.execute(
@@ -201,6 +210,7 @@ async def check_limit_definitions(
 
 
 def _rate_value(rate) -> Decimal | None:
+    """Курс из пары или сырого числа: единая нормализация входов."""
     if rate is None:
         return None
     return rate.rate if hasattr(rate, "rate") else rate

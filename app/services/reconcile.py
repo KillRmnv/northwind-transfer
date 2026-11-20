@@ -15,6 +15,7 @@ RECONCILE_ADVISORY_KEY = 410729831
 
 
 async def try_reconcile_lock(session: AsyncSession) -> bool:
+    """Неблокирующий захват single-runner лока сверки."""
     bind = session.bind
     if bind is None or bind.dialect.name != "postgresql":
         return True
@@ -24,6 +25,7 @@ async def try_reconcile_lock(session: AsyncSession) -> bool:
 
 
 async def release_reconcile_lock(session: AsyncSession) -> None:
+    """Освобождение лока сверки."""
     bind = session.bind
     if bind is None or bind.dialect.name != "postgresql":
         return
@@ -31,14 +33,17 @@ async def release_reconcile_lock(session: AsyncSession) -> None:
 
 
 def empty_stats() -> dict[str, int]:
+    """Нулевая статистика прохода сверки."""
     return {"checked": 0, "completed": 0, "failed": 0, "still_open": 0}
 
 
 async def list_open_transfers(session: AsyncSession, limit: int = 200) -> list:
+    """Открытые переводы старейшими вперёд, чужие строки пропускаются."""
     return await transfer_repo.list_open_transfers(session, limit=limit, skip_locked=True)
 
 
 async def reconcile_once(session: AsyncSession, settings: Settings, now: datetime) -> dict:
+    """Один проход сверки под advisory lock с round-robin касанием."""
     stats = empty_stats()
     if not await try_reconcile_lock(session):
         return stats
@@ -63,6 +68,7 @@ async def reconcile_transfer(
     now: datetime,
     client: ProviderClient | None = None,
 ) -> dict:
+    """Сверка одного перевода: обёртка для фонового воркера."""
     stats = empty_stats()
     stats["checked"] = 1
     client = client or ProviderClient(
@@ -74,6 +80,7 @@ async def reconcile_transfer(
 
 
 async def _sync_live_attempt(session: AsyncSession, attempt, state) -> None:
+    """Попытка догоняет подтверждённый статус у провайдера."""
     if attempt.status != state.status or attempt.payout_id != state.payout_id:
         await transfer_repo.update_attempt(
             session, attempt, state.status, state.failure_code, state.payout_id, now_utc()
@@ -82,6 +89,7 @@ async def _sync_live_attempt(session: AsyncSession, attempt, state) -> None:
 
 
 async def _settle_completed(session: AsyncSession, transfer, stats: dict) -> None:
+    """Подтверждённый успех из сверки с починкой гонки."""
     locked = await transfer_repo.get_transfer(session, transfer.transfer_id, lock=True)
     if locked is None or locked.status in TERMINAL:
         await session.refresh(transfer)
@@ -103,6 +111,7 @@ async def _reconcile_one(
     now: datetime,
     stats: dict,
 ) -> None:
+    """Диспетчер зависшего перевода: добить, завершить или оставить."""
     await session.refresh(transfer)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
@@ -134,6 +143,7 @@ async def _reconcile_one(
 
 
 def _tally(stats: dict, status: str) -> None:
+    """Учёт итога перевода в статистику прохода."""
     if status == "COMPLETED":
         stats["completed"] += 1
     elif status == "FAILED":
@@ -143,6 +153,7 @@ def _tally(stats: dict, status: str) -> None:
 
 
 async def _touch(session: AsyncSession, transfer_id, now: datetime) -> None:
+    """Касание updated_at: очередь сверки не голодает."""
     await session.execute(
         sa.update(Transfer).where(Transfer.transfer_id == transfer_id).values(updated_at=now)
     )

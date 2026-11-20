@@ -112,10 +112,13 @@ async def test_decline_scenario_fails_terminal(
 
 
 async def test_error_5xx_scenario_fails_terminal(
-    api, session, freeze_rates, live_rates, live_mock, mock_scenario
+    api, session, freeze_rates, live_rates, live_mock, mock_scenario, monkeypatch
 ) -> None:
+    from app.core.settings import settings as app_settings
+
     freeze_rates(live_rates)
     mock_scenario("error_5xx")
+    monkeypatch.setattr(app_settings, "provider_visibility_grace_sec", 6)
     quote = await make_quote(api, freeze_rates, live_rates)
     response = await post_transfer(api, quote["quote_id"], key=f"ct-5xx-{uuid.uuid4().hex[:12]}")
     with check:

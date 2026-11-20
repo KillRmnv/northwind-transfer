@@ -13,6 +13,7 @@ _CACHE: dict[str, tuple[float, dict[tuple[str, str], RateData]]] = {}
 
 
 def _parse_rates(payload: object) -> dict[tuple[str, str], RateData]:
+    """Разбор сырых курсов мока в карту с метками времени."""
     if not isinstance(payload, list):
         raise RateUnavailableError("cannot fetch rates: invalid payload")
     rates: dict[tuple[str, str], RateData] = {}
@@ -35,6 +36,7 @@ class RatesClient:
         self._timeout = timeout_sec
 
     async def fetch(self) -> dict[tuple[str, str], RateData]:
+        """Карта курсов мока с TTL-кэшем на базовый URL."""
         cached = _CACHE.get(self._base_url)
         if cached is not None and time.monotonic() - cached[0] < CACHE_TTL_SEC:
             return cached[1]
@@ -50,4 +52,5 @@ class RatesClient:
 
 
 def clear_rates_cache() -> None:
+    """Сброс кэша курсов: тесты и смена базового URL."""
     _CACHE.clear()
