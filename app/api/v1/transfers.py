@@ -7,13 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.mappers import balances_to_response, transfer_to_response
 from app.core.clock import now_utc
-from app.core.exceptions import ClientNotFoundError, TransferNotFoundError, ValidationError
+from app.core.exceptions import ClientNotFoundError, TransferNotFoundError
+from app.core.idempotency import require_idempotency_key
 from app.core.locks import transfer_lock
 from app.core.settings import settings
 from app.core.timeout import run_with_timeout
 from app.core.types import FlexibleUUID
 from app.db.engine import get_session
 from app.models.tables import Client
+from app.repositories import attempts as attempt_repo
 from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 from app.repositories.references import load_minor_units
@@ -37,19 +39,12 @@ async def _on_timeout(session: AsyncSession, transfer_id: UUID) -> str:
     return fresh.status
 
 
-def require_idempotency_key(value: str | None) -> str:
-    key = (value or "").strip()
-    if not key or len(key) > 128:
-        raise ValidationError("Idempotency-Key must be 1..128 non-blank characters")
-    return key
-
-
 async def load_transfer_view(session: AsyncSession, transfer_id: UUID) -> TransferResponse:
     transfer = await transfer_repo.get_transfer(session, transfer_id)
     if transfer is None:
         raise TransferNotFoundError(str(transfer_id))
     minor_units = await load_minor_units(session)
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    attempts = await attempt_repo.latest_attempts(session, transfer.transfer_id)
     history = await build_history(session, transfer)
     return transfer_to_response(transfer, attempts, history, minor_units)
 

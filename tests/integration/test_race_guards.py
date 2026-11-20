@@ -280,7 +280,6 @@ async def test_young_pending_attempt_blocks_next_provider(
 async def test_persistent_5xx_reaches_terminal_failed(
     api, freeze_rates, live_rates, monkeypatch
 ) -> None:
-    from app.services import transfers as transfers_module
 
     quote = await make_quote(api, freeze_rates, live_rates)
 
@@ -292,7 +291,7 @@ async def test_persistent_5xx_reaches_terminal_failed(
     async def missing_probe(self, provider_id, reference):
         return (ProbeOutcome.MISSING, None)
 
-    monkeypatch.setattr(transfers_module, "create_with_recovery", always_missing)
+    monkeypatch.setattr("app.services.transfers.recovery.create_with_recovery", always_missing)
     patch_provider(monkeypatch, probe=missing_probe)
     response = await post_transfer(api, quote["quote_id"], key="key-5xx-all")
     body = response.json()
@@ -388,7 +387,6 @@ async def test_history_from_status_uses_locked_row(
 
     from app.core.clock import now_utc
     from app.repositories import transfers as transfer_repo
-    from app.services import transfers as transfers_module
     from app.services.transfer_machine import TransferStateMachine
 
     quote = await make_quote(api, freeze_rates, live_rates)
@@ -398,7 +396,7 @@ async def test_history_from_status_uses_locked_row(
 
         return AttemptDecision(AttemptAction.PARK_FOR_REVIEW)
 
-    monkeypatch.setattr(transfers_module, "create_with_recovery", immediate_unknown)
+    monkeypatch.setattr("app.services.transfers.recovery.create_with_recovery", immediate_unknown)
     created = await post_transfer(api, quote["quote_id"], key="stale-key")
     with check:
         assert created.json()["status"] == "NEEDS_REVIEW"

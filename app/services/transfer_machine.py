@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tables import Transfer
+from app.repositories import attempts as attempt_repo
 from app.repositories import balances as balance_repo
 from app.repositories import transfers as transfer_repo
 
@@ -170,11 +171,11 @@ class TransferStateMachine:
 
     async def _sync_attempt(self, status: str, now: datetime) -> None:
         """Статус попытки догоняет статус перевода."""
-        attempts = await transfer_repo.latest_attempts(self._session, self._transfer.transfer_id)
+        attempts = await attempt_repo.latest_attempts(self._session, self._transfer.transfer_id)
         if not attempts:
             return
         latest = attempts[-1]
         if latest.status != status:
-            await transfer_repo.update_attempt(
+            await attempt_repo.update_attempt(
                 self._session, latest, status, latest.failure_code, latest.payout_id, now
             )

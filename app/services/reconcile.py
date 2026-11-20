@@ -1,15 +1,21 @@
+import asyncio
+import logging
 from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import now_utc
-from app.core.settings import Settings
+from app.core.settings import Settings, settings
+from app.db.engine import session_factory
 from app.models.tables import Transfer
+from app.repositories import attempts as attempt_repo
 from app.repositories import transfers as transfer_repo
 from app.services.providers import ProviderClient, confirm_payout
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
 from app.services.transfers import run_attempts_locked as run_attempts
+
+logger = logging.getLogger("transfer-core.reconcile")
 
 RECONCILE_ADVISORY_KEY = 410729831
 
@@ -82,7 +88,7 @@ async def reconcile_transfer(
 async def _sync_live_attempt(session: AsyncSession, attempt, state) -> None:
     """Попытка догоняет подтверждённый статус у провайдера."""
     if attempt.status != state.status or attempt.payout_id != state.payout_id:
-        await transfer_repo.update_attempt(
+        await attempt_repo.update_attempt(
             session, attempt, state.status, state.failure_code, state.payout_id, now_utc()
         )
         await session.commit()
@@ -113,7 +119,7 @@ async def _reconcile_one(
 ) -> None:
     """Диспетчер зависшего перевода: добить, завершить или оставить."""
     await session.refresh(transfer)
-    attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
+    attempts = await attempt_repo.latest_attempts(session, transfer.transfer_id)
     live = [a for a in attempts if a.payout_id and a.status in ("PROCESSING", "COMPLETED")]
     if transfer.status == "PENDING" or not live:
         status = await run_attempts(session, settings, transfer.transfer_id, now_utc(), "reconcile")
@@ -157,3 +163,29 @@ async def _touch(session: AsyncSession, transfer_id, now: datetime) -> None:
     await session.execute(
         sa.update(Transfer).where(Transfer.transfer_id == transfer_id).values(updated_at=now)
     )
+
+
+async def reconcile_pass() -> None:
+    """Один проход сверки: до восьми переводов параллельно, итог в лог."""
+    async with session_factory() as session:
+        pending = await list_open_transfers(session)
+    semaphore = asyncio.Semaphore(8)
+
+    async def run_one(transfer_id, sem=semaphore) -> dict:
+        async with sem, session_factory() as session:
+            transfer = await transfer_repo.get_transfer(session, transfer_id)
+            if transfer is None:
+                return {}
+            stats = await reconcile_transfer(session, settings, transfer, now_utc())
+            await session.commit()
+            return stats
+
+    batches = await asyncio.gather(
+        *[run_one(item.transfer_id) for item in pending], return_exceptions=True
+    )
+    total = {"checked": 0, "completed": 0, "failed": 0, "still_open": 0}
+    for batch in batches:
+        if isinstance(batch, dict):
+            for key in total:
+                total[key] += batch.get(key, 0)
+    logger.info("reconcile pass", extra={"status": total})

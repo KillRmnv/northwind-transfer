@@ -9,7 +9,7 @@ from app.core.exceptions import DailyLimitExceededError, ValidationError
 from app.core.money import format_money
 from app.core.types import Money
 from app.models.tables import Client, LimitDefinition
-from app.repositories.transfers import sum_day_source, sum_window_source
+from app.repositories.limit_queries import sum_day_source, sum_window_source
 from app.services.providers import convert_or_raise
 
 

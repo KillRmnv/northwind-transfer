@@ -1,4 +1,3 @@
-from datetime import datetime
 from decimal import Decimal
 
 from app.core.exceptions import (
@@ -11,31 +10,19 @@ from app.core.money import (
     ceil_to_minor,
     format_money,
     format_rate,
-    quantize_rate,
     quantum,
     round_money,
 )
 from app.core.types import Money, QuoteResult, RateData, TariffData
+from app.services.rates import filter_fresh_rates, is_valid_rate, resolve_rate
 
 __all__ = [
     "QuoteResult",
     "RateData",
     "TariffData",
+    "filter_fresh_rates",
+    "resolve_rate",
 ]
-
-RATE_STALE_AFTER_HOURS = 6
-
-
-def filter_fresh_rates(
-    rates: dict[tuple[str, str], RateData], now: datetime
-) -> dict[tuple[str, str], Decimal]:
-    """Только свежие пары: протухшие отбрасываются, а не подменяются."""
-    limit_sec = RATE_STALE_AFTER_HOURS * 3600
-    return {
-        pair: data.rate
-        for pair, data in rates.items()
-        if _valid_rate(data.rate) and _fresh(data, now, limit_sec)
-    }
 
 
 def find_direction(
@@ -68,59 +55,6 @@ def find_tariff(tariffs: list[TariffData], direction_id: str) -> TariffData:
         if tariff.direction_id == direction_id:
             return tariff
     raise UnsupportedDirectionError(f"unknown direction {direction_id}")
-
-
-def resolve_rate(
-    rates: dict[tuple[str, str], RateData],
-    source_currency: str,
-    target_currency: str,
-    now: datetime,
-    ttl_sec: int,
-    minor_units: dict[str, int],
-) -> Decimal:
-    """Курс: прямой, обратный или кросс; протухший — RATE_UNAVAILABLE."""
-    if source_currency == target_currency:
-        return Decimal("1")
-    limit_sec = min(ttl_sec, RATE_STALE_AFTER_HOURS * 3600)
-    direct = rates.get((source_currency, target_currency))
-    if direct is not None:
-        if not _valid_rate(direct.rate):
-            raise RateUnavailableError(f"invalid rate {source_currency} -> {target_currency}")
-        if _fresh(direct, now, limit_sec):
-            return quantize_rate(direct.rate)
-        raise RateUnavailableError(f"rate {source_currency} -> {target_currency} is stale")
-    inverse = rates.get((target_currency, source_currency))
-    if inverse is not None:
-        if not _valid_rate(inverse.rate):
-            raise RateUnavailableError(f"invalid rate {target_currency} -> {source_currency}")
-        if _fresh(inverse, now, limit_sec):
-            return quantize_rate(Decimal("1") / inverse.rate)
-    best: tuple[Decimal, datetime] | None = None
-    for (base, quote), first in rates.items():
-        if base != source_currency or not _valid_rate(first.rate):
-            continue
-        second = rates.get((quote, target_currency))
-        if second is None or not _valid_rate(second.rate):
-            continue
-        if not _fresh(first, now, limit_sec) or not _fresh(second, now, limit_sec):
-            continue
-        freshness = min(first.updated_at, second.updated_at)
-        if best is None or freshness > best[1]:
-            best = (first.rate * second.rate, freshness)
-    if best is None:
-        raise RateUnavailableError(f"no rate {source_currency} -> {target_currency}")
-    return quantize_rate(best[0])
-
-
-def _valid_rate(rate: Decimal) -> bool:
-    """Курс пригоден к расчёту: конечный и положительный."""
-    return rate.is_finite() and rate > 0
-
-
-def _fresh(data: RateData, now: datetime, limit_sec: int) -> bool:
-    """Свежесть курса: в пределах лимита и без сильного ухода в будущее."""
-    age_sec = (now - data.updated_at).total_seconds()
-    return -60 <= age_sec <= limit_sec
 
 
 def _quant(value: Decimal, currency: str, minor_units: dict[str, int]) -> Decimal:
@@ -257,7 +191,7 @@ def calculate_target(
     trace = Breakdown().add(
         f"direction {tariff.direction_id}, mode TARGET, rate {format_rate(rate)}"
     )
-    if not _valid_rate(rate):
+    if not is_valid_rate(rate):
         raise RateUnavailableError(f"invalid rate {src} -> {tgt}")
     if charged_in_source:
         to_convert_exact = amount / rate
@@ -310,7 +244,7 @@ def amount_in_limit_currency(
     """Сумма в валюте лимита; None — пересчитать нечем."""
     if amount.currency == tariff.limit_currency:
         return amount.amount
-    if not _valid_rate(rate):
+    if not is_valid_rate(rate):
         return None
     if (
         tariff.limit_currency == tariff.source_currency

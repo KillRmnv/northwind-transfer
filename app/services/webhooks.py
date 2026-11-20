@@ -12,7 +12,9 @@ from app.core.exceptions import ServiceUnavailableError, UnauthorizedError, Vali
 from app.core.metrics import inc as metrics_inc
 from app.core.settings import Settings
 from app.models.tables import Provider, WebhookEvent
+from app.repositories import attempts as attempt_repo
 from app.repositories import transfers as transfer_repo
+from app.repositories import webhook_events as webhook_repo
 from app.schemas.webhooks import WebhookEvent as WebhookEventSchema
 from app.services.providers import ProviderClient, confirm_payout
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
@@ -60,7 +62,7 @@ async def handle_webhook(
         raise ValidationError(f"unknown webhook status {event.status}")
     if await session.get(WebhookEvent, event.event_id) is not None:
         return
-    stored = await transfer_repo.store_webhook_event(
+    stored = await webhook_repo.store_webhook_event(
         session,
         event.event_id,
         provider_id,
@@ -94,14 +96,14 @@ async def _process_event(
         return
     if transfer.status in TERMINAL:
         return
-    previous = await transfer_repo.webhook_events_for_transfer(session, event.reference)
+    previous = await webhook_repo.webhook_events_for_transfer(session, event.reference)
     newest = max(
         (as_utc(item.occurred_at) for item in previous if item.event_id != event.event_id),
         default=None,
     )
     if newest is not None and occurred_at <= newest:
         return
-    attempt = await transfer_repo.find_attempt_by_payout(session, provider_id, event.payout_id)
+    attempt = await attempt_repo.find_attempt_by_payout(session, provider_id, event.payout_id)
     if attempt is not None and attempt.transfer_id != transfer.transfer_id:
         metrics_inc("webhook_foreign_payout_total")
         logger.warning(
