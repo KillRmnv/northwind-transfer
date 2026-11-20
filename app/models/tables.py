@@ -71,6 +71,12 @@ class Direction(Base):
     min_margin_percent: Mapped[object] = mapped_column(Numeric(8, 5), nullable=False)
     quote_ttl_sec: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    __table_args__ = (
+        CheckConstraint(
+            "fee_charged_in in ('SOURCE', 'TARGET')", name="ck_directions_fee_charged_in"
+        ),
+    )
+
 
 class Provider(Base):
     __tablename__ = "providers"
@@ -182,8 +188,10 @@ class TransferStatusHistory(Base):
     transfer_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("transfers.transfer_id"), nullable=False
     )
-    from_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
-    to_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(
+        ForeignKey("transfer_statuses.code"), nullable=True
+    )
+    to_status: Mapped[str] = mapped_column(ForeignKey("transfer_statuses.code"), nullable=False)
     actor: Mapped[str] = mapped_column(String(64), nullable=False)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -210,6 +218,7 @@ class PayoutAttempt(Base):
     __table_args__ = (
         Index("ix_payout_attempts_transfer", "transfer_id"),
         Index("ix_payout_attempts_reference", "reference"),
+        Index("ix_payout_attempts_provider", "provider_id"),
         UniqueConstraint("transfer_id", "attempt_no", name="uq_attempt_transfer_no"),
     )
 
@@ -224,7 +233,10 @@ class WebhookEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (Index("ix_webhook_events_reference", "reference"),)
+    __table_args__ = (
+        Index("ix_webhook_events_reference", "reference"),
+        Index("ix_webhook_events_provider", "provider_id"),
+    )
 
 
 class LimitDefinition(Base):
@@ -235,7 +247,6 @@ class LimitDefinition(Base):
     direction_id: Mapped[str | None] = mapped_column(
         ForeignKey("directions.direction_id"), nullable=True
     )
-    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     period_type: Mapped[str] = mapped_column(ForeignKey("limit_period_types.code"), nullable=False)
     window_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount: Mapped[object] = mapped_column(MONEY, nullable=False)
@@ -244,7 +255,18 @@ class LimitDefinition(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     __table_args__ = (
-        UniqueConstraint("client_id", "scope", "period_type", name="uq_limit_client_scope_period"),
+        UniqueConstraint(
+            "client_id",
+            "scope",
+            "period_type",
+            "direction_id",
+            name="uq_limit_client_scope_period_dir",
+        ),
         Index("ix_limit_definitions_client", "client_id"),
+        Index("ix_limit_definitions_direction", "direction_id"),
         CheckConstraint("scope in ('client', 'direction')", name="ck_limit_definitions_scope"),
+        CheckConstraint(
+            "scope <> 'direction' OR direction_id IS NOT NULL",
+            name="ck_limit_direction_required",
+        ),
     )

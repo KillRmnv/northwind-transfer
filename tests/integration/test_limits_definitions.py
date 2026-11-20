@@ -10,7 +10,6 @@ async def seed_limit(session, client_id: str, **values):
         client_id=client_id,
         scope=values.get("scope", "client"),
         direction_id=values.get("direction_id"),
-        category=values.get("category"),
         period_type=values.get("period_type", "DAILY"),
         window_days=values.get("window_days"),
         amount=values.get("amount", Decimal("5000")),
@@ -216,5 +215,20 @@ async def test_unknown_limit_scope_rejected_at_write(session) -> None:
 
     await seed_limit(session, "c_001", scope="direction", direction_id="RU-TH-BANK")
     with pytest.raises(IntegrityError):
-        await seed_limit(session, "c_001", scope="category", category="food")
+        await seed_limit(session, "c_001", scope="category")
+    await session.rollback()
+
+
+async def test_direction_scoped_limits_coexist_per_direction(session) -> None:
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    await seed_limit(
+        session, "c_001", scope="direction", direction_id="RU-TH-BANK", period_type="DAILY"
+    )
+    await seed_limit(
+        session, "c_001", scope="direction", direction_id="RU-TH-CARD", period_type="DAILY"
+    )
+    with pytest.raises(IntegrityError):
+        await seed_limit(session, "c_001", scope="direction", period_type="DAILY")
     await session.rollback()

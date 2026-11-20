@@ -129,7 +129,11 @@ Unit (калькулятор, коды ошибок, скоринг и HTTP-кл
 
 ## D16. Схема БД — 3НФ, справочники вместо ENUM
 
-Таблицы: `currencies`, `countries`, `payout_methods`, `directions`, `providers`, `provider_directions`, `maintenance_windows`, `clients`, `balances`, `quotes`, `transfer_statuses`, `transfers`, `transfer_status_history`, `attempt_statuses`, `payout_attempts`, `webhook_events`, `limit_period_types`, `limit_definitions`. Ни одного DB-ENUM: статусы переводов — FK к `transfer_statuses`, статусы попыток и событий вебхуков — FK к `attempt_statuses`, периоды лимитов — FK к `limit_period_types`, страны и способы выплаты — FK к своим таблицам. Статус события вебхука — тоже FK, не свободная строка.
+Таблицы: `currencies`, `countries`, `payout_methods`, `directions`, `providers`, `provider_directions`, `maintenance_windows`, `clients`, `balances`, `quotes`, `transfer_statuses`, `transfers`, `transfer_status_history`, `attempt_statuses`, `payout_attempts`, `webhook_events`, `limit_period_types`, `limit_definitions`. Ни одного DB-ENUM: статусы переводов — FK к `transfer_statuses`, статусы попыток и событий вебхуков — FK к `attempt_statuses`, периоды лимитов — FK к `limit_period_types`, страны и способы выплаты — FK к своим таблицам. Статус события вебхука тоже FK. История переходов ссылается на `transfer_statuses` обеими колонками (`from_status`, `to_status`) — свободные строки убраны (миграция 0007).
+
+Нормализация сверх 3НФ (миграция 0007): уникальность лимитов включает направление (`client_id, scope, period_type, direction_id`; `NULL` в `direction_id` не конфликтуют, client-правила друг другу не мешают); мёртвая колонка `category` удалена; `direction` без `direction_id` запрещён CHECK-ом; `fee_charged_in` ограничен `('SOURCE','TARGET')`. Недостающие индексы под FK достроены (`payout_attempts.provider_id`, `webhook_events.provider_id`, `limit_definitions.direction_id`).
+
+Осознанно не нормализовано: снапшот сумм в `quotes`/`transfers` (фиксация цены), `funds_settled` (факт движения денег отдельно от статуса), `payout_attempts.reference` (ключ поиска), получатель внутри `transfers`, `clients.daily_limit_*` отдельно от `limit_definitions` (быстрый дефолт), курсов в БД нет (мок + `rates.json`).
 
 Причина: требование SPEC «никаких DB-уровневых ENUM»; добавление статуса/периода — вставка строки сидером, а не миграция типа. Разделение `transfer_statuses` / `attempt_statuses` фиксирует разные жизненные циклы: перевод (деньги клиента) и попытка у провайдера (деньги провайдера).
 
@@ -212,7 +216,7 @@ PK справочников — коды (`VARCHAR(3)` для валют, `VARCH
 - **Асинхронный `FAILED` оставлял `PROCESSING`.** Ожидание возвращает `RETRY`, и следующий провайдер пробуется сразу, без ожидания прохода сверки.
 - **Сверка перетирала терминальный перевод** статусом попытки — теперь пропускает терминальные.
 
-Все фиксы закрыты тестами (полный набор — 170 тестов, см. D14).
+Все фиксы закрыты тестами (полный набор — 171 тестов, см. D14).
 
 ## D26. Второй раунд ревью: финальные фиксы
 
@@ -271,7 +275,7 @@ Chaos 300 поймал редкую гонку: `wait_for_settlement` по ис�
 
 Роут `POST /transfers` разбит на `require_idempotency_key`, `load_transfer_view`, `respond_with_outcome`; сидер — на `seed_currencies/reference_data/directions/providers/clients` с `build_*`-конструкторами.
 
-Причина: лесенки `if status == ...` расползались по трём сервисам и расходились друг с другом (одна ветка считала терминалом то, что другая перезаписывала). Таблица переходов + один исполнитель устраняют класс рассинхрона целиком, а мелкие функции делают роуты читаемыми без потери поведения — полный набор зелёный (170 тестов).
+Причина: лесенки `if status == ...` расползались по трём сервисам и расходились друг с другом (одна ветка считала терминалом то, что другая перезаписывала). Таблица переходов + один исполнитель устраняют класс рассинхрона целиком, а мелкие функции делают роуты читаемыми без потери поведения — полный набор зелёный (171 тестов).
 
 ## D31. State machine: состояния, переходы и акторы
 
