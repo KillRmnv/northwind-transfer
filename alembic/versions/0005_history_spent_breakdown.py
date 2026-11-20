@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import sqlalchemy as sa
-from alembic import op
 
+from alembic import op
 from app.models.guid import GUID
 
 revision: str = "0005_history_spent_breakdown"
@@ -30,12 +30,8 @@ def upgrade() -> None:
     op.add_column(
         "balances", sa.Column("spent", sa.Numeric(20, 8), nullable=False, server_default="0")
     )
-    op.create_check_constraint(
-        "ck_balances_available_non_negative", "balances", "available >= 0"
-    )
-    op.create_check_constraint(
-        "ck_balances_reserved_non_negative", "balances", "reserved >= 0"
-    )
+    op.create_check_constraint("ck_balances_available_non_negative", "balances", "available >= 0")
+    op.create_check_constraint("ck_balances_reserved_non_negative", "balances", "reserved >= 0")
     op.create_check_constraint("ck_balances_spent_non_negative", "balances", "spent >= 0")
     op.drop_constraint("transfers_idempotency_key_key", "transfers", type_="unique")
     op.create_unique_constraint(
@@ -47,9 +43,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_transfers_updated", table_name="transfers")
     op.drop_constraint("uq_transfers_client_key", "transfers", type_="unique")
-    op.create_unique_constraint(
-        "transfers_idempotency_key_key", "transfers", ["idempotency_key"]
-    )
+    op.create_unique_constraint("transfers_idempotency_key_key", "transfers", ["idempotency_key"])
     op.drop_constraint("ck_balances_spent_non_negative", "balances", type_="check")
     op.drop_constraint("ck_balances_reserved_non_negative", "balances", type_="check")
     op.drop_constraint("ck_balances_available_non_negative", "balances", type_="check")

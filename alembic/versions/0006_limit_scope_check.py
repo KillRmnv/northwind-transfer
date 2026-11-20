@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0006_limit_scope_check"
