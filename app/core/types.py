@@ -2,9 +2,25 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator
+
+from app.core.money import format_money
+
+
+@dataclass(frozen=True)
+class Money:
+    amount: Decimal
+    currency: str
+
+    def formatted(self, minor_units: dict[str, int]) -> str:
+        return format_money(self.amount, minor_units[self.currency])
+
+    @classmethod
+    def zero(cls, currency: str) -> "Money":
+        return cls(Decimal("0"), currency)
 
 
 @dataclass(frozen=True)
@@ -96,6 +112,26 @@ class PayoutState:
     reference: str
     status: str
     failure_code: str | None
+
+
+class ProbeOutcome(StrEnum):
+    FOUND = "found"
+    MISSING = "missing"
+    ERROR = "error"
+
+
+class AttemptAction(StrEnum):
+    ADOPT_LIVE = "adopt_live"
+    FAIL_AND_NEXT = "fail_and_next"
+    PARK_FOR_REVIEW = "park_for_review"
+
+
+@dataclass(frozen=True)
+class AttemptDecision:
+    action: AttemptAction
+    payout_id: str | None = None
+    status: str | None = None
+    failure_code: str | None = None
 
 
 CreateOutcome = Accepted | Declined | UnknownResult

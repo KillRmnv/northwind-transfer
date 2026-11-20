@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from functools import partial
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,70 +45,60 @@ class TransferStateMachine:
             return locked.status
         return self._transfer.status
 
-    async def start(self, now: datetime, actor: str = "service") -> bool:
-        if not self.can("PROCESSING"):
+    async def _move_unsettled(self, target: str, now: datetime, actor: str) -> bool:
+        if not self.can(target):
             return False
         previous = await self._previous_locked()
         moved = await transfer_repo.set_status_if_unsettled(
-            self._session, self._transfer.transfer_id, "PROCESSING", now
+            self._session, self._transfer.transfer_id, target, now
         )
         if moved:
             await transfer_repo.record_transition(
-                self._session, self._transfer.transfer_id, previous, "PROCESSING", actor, now
+                self._session, self._transfer.transfer_id, previous, target, actor, now
             )
             await self._session.refresh(self._transfer)
         return moved
+
+    async def _settle_with_effect(self, target, now, actor, make_effect) -> bool:
+        if not self.can(target):
+            return False
+        settled = await self._settle(target, now, actor)
+        if not settled:
+            return False
+        await make_effect()()
+        await self._sync_attempt(target, now)
+        await self._session.refresh(self._transfer)
+        return True
+
+    def _release_effect(self):
+        return partial(
+            balance_repo.release_reserve,
+            self._session,
+            self._transfer.client_id,
+            self._transfer.source_currency,
+            Decimal(self._transfer.source_amount),
+        )
+
+    def _consume_effect(self):
+        return partial(
+            balance_repo.consume_reserve,
+            self._session,
+            self._transfer.client_id,
+            self._transfer.source_currency,
+            Decimal(self._transfer.source_amount),
+        )
+
+    async def start(self, now: datetime, actor: str = "service") -> bool:
+        return await self._move_unsettled("PROCESSING", now, actor)
 
     async def complete(self, now: datetime, actor: str = "service") -> bool:
-        if not self.can("COMPLETED"):
-            return False
-        settled = await self._settle("COMPLETED", now, actor)
-        if not settled:
-            return False
-        await balance_repo.consume_reserve(
-            self._session,
-            self._transfer.client_id,
-            self._transfer.source_currency,
-            Decimal(self._transfer.source_amount),
-        )
-        await self._sync_attempt("COMPLETED", now)
-        await self._session.refresh(self._transfer)
-        return True
+        return await self._settle_with_effect("COMPLETED", now, actor, self._consume_effect)
 
     async def fail(self, now: datetime, actor: str = "service") -> bool:
-        if not self.can("FAILED"):
-            return False
-        settled = await self._settle("FAILED", now, actor)
-        if not settled:
-            return False
-        await balance_repo.release_reserve(
-            self._session,
-            self._transfer.client_id,
-            self._transfer.source_currency,
-            Decimal(self._transfer.source_amount),
-        )
-        await self._sync_attempt("FAILED", now)
-        await self._session.refresh(self._transfer)
-        return True
+        return await self._settle_with_effect("FAILED", now, actor, self._release_effect)
 
     async def needs_review(self, now: datetime, actor: str = "service") -> bool:
-        if not self.can(NEEDS_REVIEW):
-            return False
-        previous = await self._previous_locked()
-        moved = await transfer_repo.set_status_if_unsettled(
-            self._session, self._transfer.transfer_id, NEEDS_REVIEW, now
-        )
-        if moved:
-            await transfer_repo.record_transition(
-                self._session,
-                self._transfer.transfer_id,
-                previous,
-                NEEDS_REVIEW,
-                actor,
-                now,
-            )
-            await self._session.refresh(self._transfer)
-        return moved
+        return await self._move_unsettled(NEEDS_REVIEW, now, actor)
 
     async def settle_from_payout(
         self, payout_status: str, now: datetime, actor: str = "service"

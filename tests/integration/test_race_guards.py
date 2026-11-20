@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pytest_check import check
 from sqlalchemy import select, update
 
+from app.core.types import ProbeOutcome
 from app.models.tables import PayoutAttempt, Quote, WebhookEvent
 from app.services import providers as providers_module
 from tests.integration.test_transfers_api import (
@@ -107,7 +108,7 @@ async def test_unresolved_attempt_is_retried_not_stuck(
     patch_provider(monkeypatch, create=flaky_create, find=no_find)
 
     async def error_probe(self, provider_id, reference):
-        return ("error", None)
+        return (ProbeOutcome.ERROR, None)
 
     monkeypatch.setattr(providers_module.ProviderClient, "probe_payout", error_probe)
     key = "key-unresolved"
@@ -174,7 +175,7 @@ async def test_expired_quote_with_confirmed_payout_completes(
 
     async def found_probe(self, provider_id, reference):
         return (
-            "found",
+            ProbeOutcome.FOUND,
             providers_module.PayoutState(
                 payout_id="po-found", reference=reference, status="COMPLETED", failure_code=None
             ),
@@ -211,7 +212,7 @@ async def test_expired_quote_with_young_pending_keeps_reserve_for_review(
         return providers_module.UnknownResult(reason="down")
 
     async def error_probe(self, provider_id, reference):
-        return ("error", None)
+        return (ProbeOutcome.ERROR, None)
 
     patch_provider(monkeypatch, create=transport_down, probe=error_probe)
     key = "key-expire-review"
@@ -244,10 +245,10 @@ async def test_young_pending_attempt_blocks_next_provider(
         return providers_module.UnknownResult(reason="down")
 
     async def error_probe(self, provider_id, reference):
-        return ("error", None)
+        return (ProbeOutcome.ERROR, None)
 
     async def missing_probe(self, provider_id, reference):
-        return ("missing", None)
+        return (ProbeOutcome.MISSING, None)
 
     patch_provider(monkeypatch, create=transport_down, probe=error_probe)
     created = await post_transfer(api, quote["quote_id"], key="young-key")
@@ -284,10 +285,12 @@ async def test_persistent_5xx_reaches_terminal_failed(
     quote = await make_quote(api, freeze_rates, live_rates)
 
     async def always_missing(*args, **kwargs):
-        return None
+        from app.core.types import AttemptAction, AttemptDecision
+
+        return AttemptDecision(AttemptAction.FAIL_AND_NEXT, failure_code="PROVIDER_UNREACHABLE")
 
     async def missing_probe(self, provider_id, reference):
-        return ("missing", None)
+        return (ProbeOutcome.MISSING, None)
 
     monkeypatch.setattr(transfers_module, "create_with_recovery", always_missing)
     patch_provider(monkeypatch, probe=missing_probe)
@@ -318,7 +321,7 @@ async def test_needs_review_counts_toward_daily_limit(
         return providers_module.UnknownResult(reason="down")
 
     async def error_probe(self, provider_id, reference):
-        return ("error", None)
+        return (ProbeOutcome.ERROR, None)
 
     patch_provider(monkeypatch, create=transport_down, probe=error_probe)
     first = await post_transfer(api, first_quote["quote_id"], key="nr-1")
@@ -391,7 +394,9 @@ async def test_history_from_status_uses_locked_row(
     quote = await make_quote(api, freeze_rates, live_rates)
 
     async def immediate_unknown(*args, **kwargs):
-        return providers_module.UnknownResult(reason="down")
+        from app.core.types import AttemptAction, AttemptDecision
+
+        return AttemptDecision(AttemptAction.PARK_FOR_REVIEW)
 
     monkeypatch.setattr(transfers_module, "create_with_recovery", immediate_unknown)
     created = await post_transfer(api, quote["quote_id"], key="stale-key")

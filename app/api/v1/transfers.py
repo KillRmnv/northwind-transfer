@@ -1,4 +1,5 @@
 from datetime import timedelta
+from functools import partial
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Response, status
@@ -24,11 +25,16 @@ from app.services import transfers as transfer_service
 router = APIRouter(tags=["transfers"])
 
 
-async def build_history(
-    session: AsyncSession, transfer, attempts: list | None = None
-) -> list[tuple]:
+async def build_history(session: AsyncSession, transfer) -> list[tuple]:
     rows = await transfer_repo.history_for_transfer(session, transfer.transfer_id)
     return [(row.to_status, row.at, row.actor) for row in rows]
+
+
+async def _on_timeout(session: AsyncSession, transfer_id: UUID) -> str:
+    await session.rollback()
+    fresh = await transfer_repo.get_transfer(session, transfer_id)
+    assert fresh is not None
+    return fresh.status
 
 
 def require_idempotency_key(value: str | None) -> str:
@@ -44,7 +50,7 @@ async def load_transfer_view(session: AsyncSession, transfer_id: UUID) -> Transf
         raise TransferNotFoundError(str(transfer_id))
     minor_units = await load_minor_units(session)
     attempts = await transfer_repo.latest_attempts(session, transfer.transfer_id)
-    history = await build_history(session, transfer, attempts)
+    history = await build_history(session, transfer)
     return transfer_to_response(transfer, attempts, history, minor_units)
 
 
@@ -81,12 +87,6 @@ async def create_transfer(
     key = require_idempotency_key(idempotency_key)
     now = now_utc()
 
-    async def _on_timeout() -> str:
-        await session.rollback()
-        fresh = await transfer_repo.get_transfer(session, transfer.transfer_id)
-        assert fresh is not None
-        return fresh.status
-
     async with transfer_lock(f"idem:{key}"):
         transfer, _ = await transfer_service.create_transfer(
             session,
@@ -103,7 +103,7 @@ async def create_transfer(
                 session, settings, transfer.transfer_id, now, "client"
             ),
             timedelta(seconds=settings.api_sync_timeout_sec),
-            _on_timeout,
+            partial(_on_timeout, session, transfer.transfer_id),
         )
     respond_with_outcome(response, transfer.transfer_id, final_status)
     return await load_transfer_view(session, transfer.transfer_id)

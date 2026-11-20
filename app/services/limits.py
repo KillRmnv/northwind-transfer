@@ -1,14 +1,16 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import DailyLimitExceededError, RateUnavailableError, ValidationError
+from app.core.exceptions import DailyLimitExceededError, ValidationError
 from app.core.money import format_money
+from app.core.types import Money
 from app.models.tables import Client, LimitDefinition
 from app.repositories.transfers import sum_day_source, sum_window_source
-from app.services.providers import convert_amount
+from app.services.providers import convert_or_raise
 
 
 def day_bounds(now: datetime) -> tuple[datetime, datetime]:
@@ -16,30 +18,76 @@ def day_bounds(now: datetime) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-async def to_limit_currency(
-    amount: Decimal,
-    amount_currency: str,
+def to_limit_currency(
+    amount: Money,
     limit_currency: str,
     quote_rate: Decimal | None,
     quote_source: str,
     quote_target: str,
 ) -> Decimal | None:
-    if amount_currency == limit_currency:
-        return amount
+    if amount.currency == limit_currency:
+        return amount.amount
     if quote_rate is None or quote_rate == 0:
         return None
-    if amount_currency == quote_source and limit_currency == quote_target:
-        return amount * quote_rate
-    if amount_currency == quote_target and limit_currency == quote_source:
-        return amount / quote_rate
+    if amount.currency == quote_source and limit_currency == quote_target:
+        return amount.amount * quote_rate
+    if amount.currency == quote_target and limit_currency == quote_source:
+        return amount.amount / quote_rate
     return None
+
+
+def convert_entry_or_raise(
+    amount: Decimal,
+    amount_currency: str,
+    target_currency: str,
+    quote_rate: Decimal | None,
+    quote_source: str,
+    quote_target: str,
+    flat_rates: dict[tuple[str, str], Decimal],
+) -> Decimal:
+    converted = to_limit_currency(
+        Money(amount, amount_currency),
+        target_currency,
+        quote_rate,
+        quote_source,
+        quote_target,
+    )
+    if converted is not None:
+        return converted
+    return convert_or_raise(Money(amount, amount_currency), target_currency, flat_rates)
+
+
+def _minutes_window(now: datetime, window_days: int | None) -> datetime | None:
+    return now - timedelta(minutes=int(window_days or 1))
+
+
+def _hourly_window(now: datetime, window_days: int | None) -> datetime | None:
+    return now - timedelta(hours=1)
+
+
+def _daily_window(now: datetime, window_days: int | None) -> datetime | None:
+    start, _ = day_bounds(now)
+    return start
+
+
+def _window_n_window(now: datetime, window_days: int | None) -> datetime | None:
+    if not window_days or int(window_days) <= 0:
+        return None
+    return now - timedelta(days=int(window_days))
+
+
+PERIOD_WINDOW_STARTS: dict[str, Callable[[datetime, int | None], datetime | None]] = {
+    "MINUTES": _minutes_window,
+    "HOURLY": _hourly_window,
+    "DAILY": _daily_window,
+    "WINDOW_N": _window_n_window,
+}
 
 
 async def check_daily_limit(
     session: AsyncSession,
     client_id: str,
-    source_amount: Decimal,
-    source_currency: str,
+    source: Money,
     quote_rate: Decimal,
     quote_source: str,
     quote_target: str,
@@ -57,25 +105,18 @@ async def check_daily_limit(
     rows = await sum_day_source(session, client_id, start, end)
     spent = Decimal("0")
     for amount, currency, _, _, _ in rows:
-        converted = await to_limit_currency(
-            amount, currency, limit_currency, quote_rate, quote_source, quote_target
+        spent += convert_entry_or_raise(
+            amount, currency, limit_currency, quote_rate, quote_source, quote_target, flat_rates
         )
-        if converted is None:
-            converted = convert_amount(amount, currency, limit_currency, flat_rates)
-        if converted is None:
-            raise RateUnavailableError(
-                f"cannot convert {currency} to limit currency {limit_currency}"
-            )
-        spent += converted
-    addition = await to_limit_currency(
-        source_amount, source_currency, limit_currency, quote_rate, quote_source, quote_target
+    addition = convert_entry_or_raise(
+        source.amount,
+        source.currency,
+        limit_currency,
+        quote_rate,
+        quote_source,
+        quote_target,
+        flat_rates,
     )
-    if addition is None:
-        addition = convert_amount(source_amount, source_currency, limit_currency, flat_rates)
-    if addition is None:
-        raise RateUnavailableError(
-            f"cannot convert {source_currency} to limit currency {limit_currency}"
-        )
     limit = Decimal(client.daily_limit_amount)
     if spent + addition > limit:
         raise DailyLimitExceededError(
@@ -87,8 +128,7 @@ async def check_daily_limit(
 async def check_limit_definitions(
     session: AsyncSession,
     client_id: str,
-    source_amount: Decimal,
-    source_currency: str,
+    source: Money,
     tariff_direction_id: str,
     minor_units: dict[str, int],
     live_rates: dict[tuple[str, str], Decimal],
@@ -117,17 +157,11 @@ async def check_limit_definitions(
         weight = Decimal(definition.weight)
         if weight <= 0:
             weight = Decimal("1")
-        if definition.period_type == "MINUTES":
-            window_start = now - timedelta(minutes=int(definition.window_days or 1))
-        elif definition.period_type == "HOURLY":
-            window_start = now - timedelta(hours=1)
-        elif definition.period_type == "DAILY":
-            window_start, _ = day_bounds(now)
-        elif definition.period_type == "WINDOW_N":
-            if not definition.window_days or int(definition.window_days) <= 0:
-                continue
-            window_start = now - timedelta(days=int(definition.window_days))
-        else:
+        start_fn = PERIOD_WINDOW_STARTS.get(definition.period_type)
+        if start_fn is None:
+            continue
+        window_start = start_fn(now, definition.window_days)
+        if window_start is None:
             continue
         entries = await sum_window_source(
             session,
@@ -137,33 +171,28 @@ async def check_limit_definitions(
         )
         total = Decimal("0")
         for amount, currency, rate, target_currency in entries:
-            converted = await to_limit_currency(
-                amount, currency, definition.currency, rate, currency, target_currency
-            )
-            if converted is None:
-                converted = convert_amount(amount, currency, definition.currency, flat_rates)
-            if converted is None:
-                raise RateUnavailableError(
-                    f"cannot convert {currency} to limit currency {definition.currency}"
+            total += (
+                convert_entry_or_raise(
+                    amount,
+                    currency,
+                    definition.currency,
+                    rate,
+                    currency,
+                    target_currency,
+                    flat_rates,
                 )
-            total += converted * weight
-        live_rate = flat_rates.get((source_currency, definition.currency))
-        addition = await to_limit_currency(
-            source_amount,
-            source_currency,
+                * weight
+            )
+        live_rate = flat_rates.get((source.currency, definition.currency))
+        addition = convert_entry_or_raise(
+            source.amount,
+            source.currency,
             definition.currency,
             live_rate,
-            source_currency,
+            source.currency,
             definition.currency,
+            flat_rates,
         )
-        if addition is None:
-            addition = convert_amount(
-                source_amount, source_currency, definition.currency, flat_rates
-            )
-        if addition is None:
-            raise RateUnavailableError(
-                f"cannot convert {source_currency} to limit currency {definition.currency}"
-            )
         if total + addition * weight > Decimal(definition.amount):
             raise DailyLimitExceededError(
                 f"limit {definition.scope}/{definition.period_type} exceeded for {client_id}",
@@ -175,15 +204,3 @@ def _rate_value(rate) -> Decimal | None:
     if rate is None:
         return None
     return rate.rate if hasattr(rate, "rate") else rate
-
-
-def convert_via_rates(
-    amount: Decimal,
-    amount_currency: str,
-    target_currency: str,
-    live_rates: dict,
-) -> Decimal | None:
-
-    flat = {pair: _rate_value(rate) for pair, rate in live_rates.items()}
-    flat = {pair: value for pair, value in flat.items() if value is not None}
-    return convert_amount(amount, amount_currency, target_currency, flat)

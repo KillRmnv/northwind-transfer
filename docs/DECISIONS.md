@@ -322,3 +322,17 @@ FAILED --> [*]
 ## D34. Contract-тесты против живого мока через `X-Scenario`
 
 Мок поддерживает per-request сценарий заголовком `X-Scenario` (ТЗ §7, «для разработки»), но сервис его не отправлял. Добавлен опциональный шов только для тестов: `ProviderClient(..., scenario=None)` — при заданном сценарии уходит заголовок `X-Scenario`; продовый путь его не задаёт никогда. `tests/integration/test_mock_contract.py` гоняет `ok`/`decline`/`error_5xx`/`slow` сквозь реальный HTTP мока до итогового статуса (включая сверку `FAILED`-выплаты с ledger мока для `ok`). Вебхуки мока в этих тестах уходят в глухой адрес (`public_base_url=http://127.0.0.1:9` через monkeypatch), чтобы не засорять dev-БД; доставка вебхуков покрыта отдельно. Без доступного мока тесты скипаются, на хосте не выполняются.
+
+## D35. Читаемость бизнес-логики: паттерны без смены поведения
+
+Рефакторинг `transfers`/`limits`/`providers`/`quotes`/`machine`/`reconcile` — только читаемость, поведение и тесты не менялись (полный сьют + chaos после):
+
+- Value Object `Money(amount, currency)` (`core/types.py`): пары `(Decimal, str)` в сигнатурах скоринга и лимитов схлопнуты, конвертация — через `convert_or_raise` (fail-closed, одно место вместо тройного fallback в каждом цикле).
+- `RetryPolicy` + `probe_with_retries`: единый цикл «поспать → опросить → классифицировать» вместо копий в `create_with_recovery`; политика инжектится, задержки больше не зашиты в тело.
+- `AttemptDecision`/`AttemptAction` (`ADOPT_LIVE`/`FAIL_AND_NEXT`/`PARK_FOR_REVIEW`): `create_with_recovery` нормализует исход попытки один раз, цикл провайдеров — диспетчер из трёх ветвей вместо лесенки `isinstance` на пять форм (дубль веток `Accepted`/`found` убран).
+- `ProbeOutcome` (`StrEnum`): строковые `"found"/"missing"/"error"` заменены перечислением; фейки в тестах возвращают его же.
+- `TransferStateMachine._transition`: `start`/`needs_review` — один шаблон, `complete`/`fail` — один шаблон с денежным эффектом (`_consume_effect`/`_release_effect`).
+- `_classify_create` в `providers.py`: чистая функция классификации HTTP-ответа мока (тестируема без HTTP).
+- `Breakdown`-билдер и `_converge_forward` в `quotes.py`: сборка трассировки и 10-шаговая сходимость TARGET написаны один раз.
+- `confirm_payout` (`get` → `find` → проверка `reference`): один способ подтвердить выплату у провайдера для `wait_for_settlement` и вебхуков.
+- Карта периодов `PERIOD_WINDOWS` вместо цепочки `if/elif` в лимитах; `_find_existing` вместо двух копий проверки ключа; `_on_timeout` — функция модуля, а не замыкание; локальные импорты репозитория подняты наверх; `lock_client` — через общий `for_update`.

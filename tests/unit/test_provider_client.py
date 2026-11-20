@@ -3,7 +3,7 @@ import pytest
 import respx
 from pytest_check import check
 
-from app.core.types import Accepted, Declined, UnknownResult
+from app.core.types import Accepted, Declined, ProbeOutcome, UnknownResult
 from app.services.providers import ProviderClient
 
 BASE = "http://mock-provider:9000"
@@ -110,7 +110,7 @@ async def test_probe_payout_distinguishes_404_and_error() -> None:
     respx.get(f"{BASE}/prov_alpha/payouts").mock(return_value=httpx.Response(404))
     outcome, state = await client().probe_payout("prov_alpha", "ref-1")
     with check:
-        assert outcome == "missing"
+        assert outcome == ProbeOutcome.MISSING
     with check:
         assert state is None
 
@@ -119,7 +119,7 @@ async def test_probe_payout_distinguishes_404_and_error() -> None:
 async def test_probe_payout_error_on_5xx() -> None:
     respx.get(f"{BASE}/prov_alpha/payouts").mock(return_value=httpx.Response(503))
     outcome, _ = await client().probe_payout("prov_alpha", "ref-1")
-    assert outcome == "error"
+    assert outcome == ProbeOutcome.ERROR
 
 
 @respx.mock
@@ -137,7 +137,7 @@ async def test_probe_payout_found() -> None:
     )
     outcome, state = await client().probe_payout("prov_alpha", "ref-1")
     with check:
-        assert outcome == "found"
+        assert outcome == ProbeOutcome.FOUND
     with check:
         assert state is not None and state.status == "COMPLETED"
 

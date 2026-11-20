@@ -8,6 +8,7 @@ from pytest_check import check
 
 from app.core import exceptions
 from app.core.money import format_money
+from app.core.types import Money
 from app.services import quotes as service
 from app.services.quotes import RateData, TariffData
 
@@ -175,7 +176,7 @@ def test_amount_limits(amount: str, code: str, now: datetime) -> None:
     rate = service.resolve_rate(rates, "RUB", "THB", now, 10**9, MINOR)
     with pytest.raises(getattr(exceptions, _code_to_error(code))) as exc_info:
         service.check_limits(
-            service.amount_in_limit_currency(Decimal(amount), "RUB", direction, rate),
+            service.amount_in_limit_currency(Money(Decimal(amount), "RUB"), direction, rate),
             direction,
             MINOR,
         )

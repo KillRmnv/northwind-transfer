@@ -3,12 +3,15 @@ from decimal import Decimal
 
 import httpx
 
+from app.core.exceptions import RateUnavailableError
 from app.core.http_client import get_json
 from app.core.types import (
     Accepted,
     CreateOutcome,
     Declined,
+    Money,
     PayoutState,
+    ProbeOutcome,
     ProviderInfo,
     ScoredProvider,
     UnknownResult,
@@ -63,16 +66,29 @@ def convert_amount(
     return None
 
 
+def convert_money(
+    source: Money, target_currency: str, rates: dict[tuple[str, str], Decimal]
+) -> Decimal | None:
+    return convert_amount(source.amount, source.currency, target_currency, rates)
+
+
+def convert_or_raise(
+    source: Money, target_currency: str, rates: dict[tuple[str, str], Decimal]
+) -> Decimal:
+    converted = convert_money(source, target_currency, rates)
+    if converted is None:
+        raise RateUnavailableError(f"cannot convert {source.currency} to {target_currency}")
+    return converted
+
+
 def provider_fee_in_source(
     provider: ProviderInfo,
-    target_amount: Decimal,
-    target_currency: str,
+    target: Money,
     source_currency: str,
     rates: dict[tuple[str, str], Decimal],
-    minor_units: dict[str, int],
-) -> Decimal | None:
+) -> Money | None:
 
-    amount_in_provider = convert_amount(target_amount, target_currency, provider.currency, rates)
+    amount_in_provider = convert_amount(target.amount, target.currency, provider.currency, rates)
     if amount_in_provider is None:
         return None
     fee_in_provider = (
@@ -81,18 +97,17 @@ def provider_fee_in_source(
     converted = convert_amount(fee_in_provider, provider.currency, source_currency, rates)
     if converted is None:
         return None
-    return converted
+    return Money(converted, source_currency)
 
 
 def filter_limits(
     providers: list[ProviderInfo],
-    target_amount: Decimal,
-    target_currency: str,
+    target: Money,
     rates: dict[tuple[str, str], Decimal],
 ) -> list[ProviderInfo]:
     kept = []
     for provider in providers:
-        converted = convert_amount(target_amount, target_currency, provider.currency, rates)
+        converted = convert_amount(target.amount, target.currency, provider.currency, rates)
         if converted is None:
             continue
         if provider.limit_min <= converted <= provider.limit_max:
@@ -102,23 +117,19 @@ def filter_limits(
 
 def score_providers(
     providers: list[ProviderInfo],
-    client_fee_source: Decimal,
-    source_amount: Decimal,
-    source_currency: str,
-    target_amount: Decimal,
-    target_currency: str,
+    *,
+    client_fee: Money,
+    source: Money,
+    target: Money,
     rates: dict[tuple[str, str], Decimal],
-    minor_units: dict[str, int],
     min_margin_percent: Decimal,
 ) -> list[ScoredProvider]:
     scored = []
     for provider in providers:
-        fee_source = provider_fee_in_source(
-            provider, target_amount, target_currency, source_currency, rates, minor_units
-        )
-        if fee_source is None or source_amount == 0:
+        fee_source = provider_fee_in_source(provider, target, source.currency, rates)
+        if fee_source is None or source.amount == 0:
             continue
-        margin = (client_fee_source - fee_source) / source_amount
+        margin = (client_fee.amount - fee_source.amount) / source.amount
         if margin < min_margin_percent / Decimal("100"):
             continue
         score = (
@@ -127,10 +138,33 @@ def score_providers(
             - Decimal(provider.p95_latency_ms) / W_LATENCY_MS
         )
         scored.append(
-            ScoredProvider(provider=provider, score=score, provider_fee_source=fee_source)
+            ScoredProvider(provider=provider, score=score, provider_fee_source=fee_source.amount)
         )
     scored.sort(key=lambda item: item.score, reverse=True)
     return scored
+
+
+def _classify_create(status_code: int | None, payload: object) -> CreateOutcome:
+    if status_code is None:
+        return UnknownResult(reason="transport error")
+    if status_code == 201 and isinstance(payload, dict) and payload.get("payout_id"):
+        return Accepted(
+            payout_id=str(payload["payout_id"]),
+            status=str(payload.get("status", "PROCESSING")),
+        )
+    if status_code == 201:
+        return UnknownResult(reason="http 201 without payout_id")
+    if status_code == 422 and isinstance(payload, dict):
+        return Declined(failure_code=str(payload.get("code", "DECLINED")))
+    if status_code == 503:
+        return Declined(failure_code="PROVIDER_UNAVAILABLE")
+    if status_code is not None and 500 <= status_code < 600:
+        return UnknownResult(reason=f"http {status_code}")
+    if status_code == 409:
+        return UnknownResult(reason="idempotency conflict at provider")
+    if isinstance(payload, dict):
+        return UnknownResult(reason=str(payload.get("code", f"http {status_code}")))
+    return UnknownResult(reason=f"http {status_code}")
 
 
 class ProviderClient:
@@ -170,26 +204,7 @@ class ProviderClient:
                 json=body,
                 headers=headers,
             )
-        if status_code is None:
-            return UnknownResult(reason="transport error")
-        if status_code == 201 and isinstance(payload, dict) and payload.get("payout_id"):
-            return Accepted(
-                payout_id=str(payload["payout_id"]),
-                status=str(payload.get("status", "PROCESSING")),
-            )
-        if status_code == 201:
-            return UnknownResult(reason="http 201 without payout_id")
-        if status_code == 422 and isinstance(payload, dict):
-            return Declined(failure_code=str(payload.get("code", "DECLINED")))
-        if status_code == 503:
-            return Declined(failure_code="PROVIDER_UNAVAILABLE")
-        if status_code is not None and 500 <= status_code < 600:
-            return UnknownResult(reason=f"http {status_code}")
-        if status_code == 409:
-            return UnknownResult(reason="idempotency conflict at provider")
-        if isinstance(payload, dict):
-            return UnknownResult(reason=str(payload.get("code", f"http {status_code}")))
-        return UnknownResult(reason=f"http {status_code}")
+        return _classify_create(status_code, payload)
 
     async def get_payout(self, provider_id: str, payout_id: str) -> PayoutState | None:
         async with self._client() as client:
@@ -202,11 +217,11 @@ class ProviderClient:
 
     async def find_payout(self, provider_id: str, reference: str) -> PayoutState | None:
         outcome, state = await self.probe_payout(provider_id, reference)
-        return state if outcome == "found" else None
+        return state if outcome is ProbeOutcome.FOUND else None
 
     async def probe_payout(
         self, provider_id: str, reference: str
-    ) -> tuple[str, PayoutState | None]:
+    ) -> tuple[ProbeOutcome, PayoutState | None]:
         async with self._client() as client:
             status_code, payload = await get_json(
                 client,
@@ -215,15 +230,26 @@ class ProviderClient:
                 params={"reference": reference},
             )
         if status_code is None:
-            return "error", None
+            return ProbeOutcome.ERROR, None
         if status_code == 404:
-            return "missing", None
+            return ProbeOutcome.MISSING, None
         if status_code != 200 or not isinstance(payload, dict):
-            return "error", None
-        return "found", _parse_state(payload)
+            return ProbeOutcome.ERROR, None
+        return ProbeOutcome.FOUND, _parse_state(payload)
 
 
 ALLOWED_PAYOUT_STATUSES = frozenset({"PROCESSING", "COMPLETED", "FAILED"})
+
+
+async def confirm_payout(
+    client: ProviderClient, provider_id: str, payout_id: str, reference: str
+) -> PayoutState | None:
+    state = await client.get_payout(provider_id, payout_id)
+    if state is None:
+        state = await client.find_payout(provider_id, reference)
+    if state is not None and state.reference and state.reference != reference:
+        return None
+    return state
 
 
 def _parse_state(payload: dict) -> PayoutState:

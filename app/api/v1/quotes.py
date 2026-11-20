@@ -15,6 +15,7 @@ from app.core.exceptions import (
 from app.core.money import amount_string_is_valid, ensure_storable
 from app.core.parse import parse_decimal
 from app.core.settings import settings
+from app.core.types import Money
 from app.db.engine import get_session
 from app.repositories.quotes import get_quote as load_quote
 from app.repositories.quotes import save_quote
@@ -96,7 +97,7 @@ async def create_quote(
         field="quote amount",
     )
     limit_amount = amount_in_limit_currency(
-        result.source_amount, tariff.source_currency, tariff, rate
+        Money(result.source_amount, tariff.source_currency), tariff, rate
     )
     if limit_amount is None:
         raise RateUnavailableError(

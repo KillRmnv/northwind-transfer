@@ -7,6 +7,7 @@ from pytest_check import check
 
 from app.api.v1 import transfers as transfers_route
 from app.core.settings import settings as app_settings
+from app.core.types import ProbeOutcome
 from app.services import providers as providers_module
 
 
@@ -56,11 +57,11 @@ def patch_provider(monkeypatch, create=None, get=None, find=None, probe=None):
             if _get is not None:
                 state = await _get(self, provider_id, "probe-payout-id")
                 if state is not None:
-                    return "found", state
+                    return ProbeOutcome.FOUND, state
             if _find is not None:
                 state = await _find(self, provider_id, reference)
-                return ("found" if state is not None else "missing"), state
-            return "missing", None
+                return (ProbeOutcome.FOUND if state is not None else ProbeOutcome.MISSING), state
+            return ProbeOutcome.MISSING, None
 
         monkeypatch.setattr(providers_module.ProviderClient, "probe_payout", probe_via_get_find)
 

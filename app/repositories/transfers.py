@@ -9,7 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import IdempotencyConflictError
 from app.core.parse import try_parse_uuid
-from app.models.tables import PayoutAttempt, Quote, Transfer, WebhookEvent
+from app.models.tables import (
+    Client,
+    PayoutAttempt,
+    Quote,
+    Transfer,
+    TransferStatusHistory,
+    WebhookEvent,
+)
 from app.repositories.balances import for_update
 
 
@@ -28,12 +35,8 @@ async def get_transfer(
 
 
 async def lock_client(session: AsyncSession, client_id: str):
-    from app.models.tables import Client
-
     query = sa.select(Client).where(Client.client_id == client_id)
-    if session.bind and session.bind.dialect.name != "sqlite":
-        query = query.with_for_update()
-    return (await session.execute(query)).scalar_one_or_none()
+    return (await session.execute(for_update(query, session))).scalar_one_or_none()
 
 
 async def record_transition(
@@ -44,8 +47,6 @@ async def record_transition(
     actor: str,
     now: datetime,
 ) -> None:
-    from app.models.tables import TransferStatusHistory
-
     session.add(
         TransferStatusHistory(
             transfer_id=transfer_id,
@@ -59,8 +60,6 @@ async def record_transition(
 
 
 async def history_for_transfer(session: AsyncSession, transfer_id) -> list:
-    from app.models.tables import TransferStatusHistory
-
     query = (
         sa.select(TransferStatusHistory)
         .where(TransferStatusHistory.transfer_id == transfer_id)

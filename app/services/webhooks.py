@@ -14,7 +14,7 @@ from app.core.settings import Settings
 from app.models.tables import Provider, WebhookEvent
 from app.repositories import transfers as transfer_repo
 from app.schemas.webhooks import WebhookEvent as WebhookEventSchema
-from app.services.providers import ProviderClient
+from app.services.providers import ProviderClient, confirm_payout
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
 from app.services.transfers import run_attempts_locked as run_attempts
 
@@ -111,24 +111,11 @@ async def _process_event(
         )
         return
     client = ProviderClient(settings.mock_provider_url, settings.mock_provider_timeout_sec)
-    state = await client.get_payout(provider_id, event.payout_id)
-    if state is None:
-        state = await client.find_payout(provider_id, event.reference)
+    state = await confirm_payout(client, provider_id, event.payout_id, event.reference)
     if state is None:
         metrics_inc("webhook_unknown_payout_total")
         logger.warning(
-            "webhook payout not found at provider",
-            extra={
-                "provider_id": provider_id,
-                "payout_id": event.payout_id,
-                "reference": event.reference,
-            },
-        )
-        return
-    if state is not None and state.reference and state.reference != event.reference:
-        metrics_inc("webhook_unknown_payout_total")
-        logger.warning(
-            "webhook payout reference mismatch",
+            "webhook payout not confirmed at provider",
             extra={
                 "provider_id": provider_id,
                 "payout_id": event.payout_id,

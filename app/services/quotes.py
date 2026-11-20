@@ -15,7 +15,7 @@ from app.core.money import (
     quantum,
     round_money,
 )
-from app.core.types import QuoteResult, RateData, TariffData
+from app.core.types import Money, QuoteResult, RateData, TariffData
 
 __all__ = [
     "QuoteResult",
@@ -121,6 +121,22 @@ def _quant(value: Decimal, currency: str, minor_units: dict[str, int]) -> Decima
     return round_money(value, minor_units[currency])
 
 
+class Breakdown:
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+
+    def add(self, text: str) -> "Breakdown":
+        self._lines.append(text)
+        return self
+
+    def extend(self, lines: list[str]) -> "Breakdown":
+        self._lines.extend(lines)
+        return self
+
+    def build(self) -> list[str]:
+        return list(self._lines)
+
+
 def calculate_source(
     amount: Decimal,
     tariff: TariffData,
@@ -130,13 +146,13 @@ def calculate_source(
     src, tgt = tariff.source_currency, tariff.target_currency
     charged_in_source = tariff.fee_charged_in == "SOURCE"
     fee_currency = src if charged_in_source else tgt
-    breakdown = [
-        f"direction {tariff.direction_id}, mode SOURCE, rate {format_rate(rate)}",
-    ]
+    trace = Breakdown().add(
+        f"direction {tariff.direction_id}, mode SOURCE, rate {format_rate(rate)}"
+    )
     if charged_in_source:
         fee_raw = amount * tariff.fee_percent / Decimal("100") + tariff.fee_fixed
         fee = max(_quant(fee_raw, src, minor_units), _quant(tariff.fee_min, src, minor_units))
-        breakdown.append(
+        trace.add(
             f"fee = max({format_money(amount, minor_units[src])} {src} × "
             f"{tariff.fee_percent}% + {format_money(tariff.fee_fixed, minor_units[src])} {src}, "
             f"min {format_money(tariff.fee_min, minor_units[src])} {src}) = "
@@ -144,12 +160,12 @@ def calculate_source(
         )
         to_convert = _quant(amount - fee, src, minor_units)
         target = _quant(to_convert * rate, tgt, minor_units)
-        breakdown.append(
+        trace.add(
             f"to_convert = {format_money(amount, minor_units[src])} − "
             f"{format_money(fee, minor_units[src])} = "
             f"{format_money(to_convert, minor_units[src])} {src}"
         )
-        breakdown.append(
+        trace.add(
             f"target = {format_money(to_convert, minor_units[src])} × {format_rate(rate)} = "
             f"{format_money(target, minor_units[tgt])} {tgt}"
         )
@@ -159,17 +175,17 @@ def calculate_source(
         fee = max(_quant(fee_raw, tgt, minor_units), _quant(tariff.fee_min, tgt, minor_units))
         to_convert = _quant(amount, src, minor_units)
         target = _quant(gross - fee, tgt, minor_units)
-        breakdown.append(
+        trace.add(
             f"gross = {format_money(amount, minor_units[src])} × {format_rate(rate)} = "
             f"{format_money(gross, minor_units[tgt])} {tgt}"
         )
-        breakdown.append(
+        trace.add(
             f"fee = max(gross × {tariff.fee_percent}% + "
             f"{format_money(tariff.fee_fixed, minor_units[tgt])}, "
             f"min {format_money(tariff.fee_min, minor_units[tgt])}) = "
             f"{format_money(fee, minor_units[tgt])} {tgt}"
         )
-        breakdown.append(f"target = gross − fee = {format_money(target, minor_units[tgt])} {tgt}")
+        trace.add(f"target = gross − fee = {format_money(target, minor_units[tgt])} {tgt}")
     return QuoteResult(
         direction_id=tariff.direction_id,
         source_amount=_quant(amount, src, minor_units),
@@ -180,7 +196,38 @@ def calculate_source(
         rate=rate,
         target_amount=target,
         target_currency=tgt,
-        breakdown=breakdown,
+        breakdown=trace.build(),
+    )
+
+
+def _converge_forward(
+    source: Decimal,
+    tariff: TariffData,
+    rate: Decimal,
+    minor_units: dict[str, int],
+    target_amount: Decimal,
+    trace: Breakdown,
+) -> QuoteResult:
+    forward = calculate_source(source, tariff, rate, minor_units)
+    for _ in range(10):
+        if forward.target_amount >= target_amount:
+            break
+        source = ceil_to_minor(
+            Decimal(forward.source_amount) + quantum(minor_units[tariff.source_currency]),
+            minor_units[tariff.source_currency],
+        )
+        forward = calculate_source(source, tariff, rate, minor_units)
+    return QuoteResult(
+        direction_id=forward.direction_id,
+        source_amount=forward.source_amount,
+        source_currency=forward.source_currency,
+        fee_amount=forward.fee_amount,
+        fee_currency=forward.fee_currency,
+        amount_to_convert=forward.amount_to_convert,
+        rate=forward.rate,
+        target_amount=forward.target_amount,
+        target_currency=forward.target_currency,
+        breakdown=trace.extend(forward.breakdown).build(),
     )
 
 
@@ -192,9 +239,9 @@ def calculate_target(
 ) -> QuoteResult:
     src, tgt = tariff.source_currency, tariff.target_currency
     charged_in_source = tariff.fee_charged_in == "SOURCE"
-    breakdown = [
-        f"direction {tariff.direction_id}, mode TARGET, rate {format_rate(rate)}",
-    ]
+    trace = Breakdown().add(
+        f"direction {tariff.direction_id}, mode TARGET, rate {format_rate(rate)}"
+    )
     if not _valid_rate(rate):
         raise RateUnavailableError(f"invalid rate {src} -> {tgt}")
     if charged_in_source:
@@ -208,27 +255,7 @@ def calculate_target(
         source = percent_candidate
         if raw_fee < tariff.fee_min:
             source = ceil_to_minor(to_convert_exact + tariff.fee_min, minor_units[src])
-        forward = calculate_source(source, tariff, rate, minor_units)
-        for _ in range(10):
-            if forward.target_amount >= amount:
-                break
-            source = ceil_to_minor(
-                Decimal(forward.source_amount) + quantum(minor_units[src]),
-                minor_units[src],
-            )
-            forward = calculate_source(source, tariff, rate, minor_units)
-        return QuoteResult(
-            direction_id=forward.direction_id,
-            source_amount=forward.source_amount,
-            source_currency=forward.source_currency,
-            fee_amount=forward.fee_amount,
-            fee_currency=forward.fee_currency,
-            amount_to_convert=forward.amount_to_convert,
-            rate=forward.rate,
-            target_amount=forward.target_amount,
-            target_currency=forward.target_currency,
-            breakdown=breakdown + forward.breakdown,
-        )
+        return _converge_forward(source, tariff, rate, minor_units, amount, trace)
     percent_gross = (amount + tariff.fee_fixed) / (
         Decimal("1") - tariff.fee_percent / Decimal("100")
     )
@@ -237,27 +264,7 @@ def calculate_target(
     source = percent_source
     if raw_gross_fee < tariff.fee_min:
         source = ceil_to_minor((amount + tariff.fee_min) / rate, minor_units[src])
-    forward = calculate_source(source, tariff, rate, minor_units)
-    for _ in range(10):
-        if forward.target_amount >= amount:
-            break
-        source = ceil_to_minor(
-            Decimal(forward.source_amount) + quantum(minor_units[src]),
-            minor_units[src],
-        )
-        forward = calculate_source(source, tariff, rate, minor_units)
-    return QuoteResult(
-        direction_id=forward.direction_id,
-        source_amount=forward.source_amount,
-        source_currency=forward.source_currency,
-        fee_amount=forward.fee_amount,
-        fee_currency=forward.fee_currency,
-        amount_to_convert=forward.amount_to_convert,
-        rate=forward.rate,
-        target_amount=forward.target_amount,
-        target_currency=forward.target_currency,
-        breakdown=breakdown + forward.breakdown,
-    )
+    return _converge_forward(source, tariff, rate, minor_units, amount, trace)
 
 
 def check_limits(
@@ -280,23 +287,22 @@ def check_limits(
 
 
 def amount_in_limit_currency(
-    amount: Decimal,
-    amount_currency: str,
+    amount: Money,
     tariff: TariffData,
     rate: Decimal,
 ) -> Decimal | None:
-    if amount_currency == tariff.limit_currency:
-        return amount
+    if amount.currency == tariff.limit_currency:
+        return amount.amount
     if not _valid_rate(rate):
         return None
     if (
         tariff.limit_currency == tariff.source_currency
-        and amount_currency == tariff.target_currency
+        and amount.currency == tariff.target_currency
     ):
-        return amount / rate
+        return amount.amount / rate
     if (
         tariff.limit_currency == tariff.target_currency
-        and amount_currency == tariff.source_currency
+        and amount.currency == tariff.source_currency
     ):
-        return amount * rate
+        return amount.amount * rate
     return None

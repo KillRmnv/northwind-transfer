@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from pytest_check import check
 
-from app.core.types import ProviderInfo, Window
+from app.core.types import Money, ProviderInfo, Window
 from app.services.providers import (
     convert_amount,
     filter_availability,
@@ -66,7 +66,7 @@ def test_filter_availability_excludes_disabled_and_maintenance(now) -> None:
 def test_filter_limits_converts_to_provider_currency() -> None:
     cheap = provider("cheap", limit_min=Decimal("1"), limit_max=Decimal("5000"))
     tight = provider("tight", limit_min=Decimal("100000"), limit_max=Decimal("200000"))
-    kept = filter_limits([cheap, tight], Decimal("4137"), "THB", RATES)
+    kept = filter_limits([cheap, tight], Money(Decimal("4137"), "THB"), RATES)
     assert [p.provider_id for p in kept] == ["cheap"]
 
 
@@ -98,13 +98,10 @@ def test_scoring_prefers_margin_then_success() -> None:
     )
     scored = score_providers(
         [poor, rich],
-        client_fee_source=Decimal("150"),
-        source_amount=Decimal("10000"),
-        source_currency="RUB",
-        target_amount=Decimal("4137"),
-        target_currency="THB",
+        client_fee=Money(Decimal("150"), "RUB"),
+        source=Money(Decimal("10000"), "RUB"),
+        target=Money(Decimal("4137"), "THB"),
         rates=RATES,
-        minor_units=MINOR,
         min_margin_percent=Decimal("0.5"),
     )
     assert [item.provider.provider_id for item in scored] == ["rich", "poor"]
@@ -114,13 +111,10 @@ def test_margin_floor_filters_unprofitable() -> None:
     greedy = provider("greedy", fee_percent=Decimal("50"), fee_fixed=Decimal("100"))
     scored = score_providers(
         [greedy],
-        client_fee_source=Decimal("10"),
-        source_amount=Decimal("10000"),
-        source_currency="RUB",
-        target_amount=Decimal("4137"),
-        target_currency="THB",
+        client_fee=Money(Decimal("10"), "RUB"),
+        source=Money(Decimal("10000"), "RUB"),
+        target=Money(Decimal("4137"), "THB"),
         rates=RATES,
-        minor_units=MINOR,
         min_margin_percent=Decimal("0.5"),
     )
     assert scored == []
