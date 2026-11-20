@@ -13,6 +13,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -175,7 +176,17 @@ class Transfer(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        Index("ix_transfers_client_created", "client_id", "created_at"),
+        Index(
+            "ix_transfers_client_created",
+            "client_id",
+            "created_at",
+            postgresql_include=["status", "source_amount", "source_currency", "quote_id"],
+        ),
+        Index(
+            "ix_transfers_open_updated",
+            "updated_at",
+            postgresql_where=text("status IN ('PENDING', 'PROCESSING', 'NEEDS_REVIEW')"),
+        ),
         Index("ix_transfers_updated", "updated_at"),
         Index("ix_transfers_quote", "quote_id"),
         UniqueConstraint("client_id", "idempotency_key", name="uq_transfers_client_key"),
@@ -218,7 +229,7 @@ class PayoutAttempt(Base):
     __table_args__ = (
         Index("ix_payout_attempts_transfer", "transfer_id"),
         Index("ix_payout_attempts_reference", "reference"),
-        Index("ix_payout_attempts_provider", "provider_id"),
+        Index("ix_payout_attempts_provider_payout", "provider_id", "payout_id"),
         UniqueConstraint("transfer_id", "attempt_no", name="uq_attempt_transfer_no"),
     )
 
