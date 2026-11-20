@@ -52,6 +52,7 @@ jobs:
         run: DB_HOST=localhost DB_PORT=5432 MOCK_PROVIDER_URL=http://localhost:9000 uv run --frozen pytest -q -p no:cacheprovider
         env:
           UV_HTTP_TIMEOUT: 120
+          PROVIDER_WEBHOOK_SECRET: local-dev-webhook-secret
 
       - name: Migrations on clean DB
         run: DB_HOST=localhost DB_PORT=5432 uv run --frozen alembic upgrade head
