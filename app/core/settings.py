@@ -1,4 +1,4 @@
-from pydantic import PositiveFloat
+from pydantic import PositiveFloat, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,8 +32,15 @@ class Settings(BaseSettings):
 
     api_sync_timeout_sec: float = 12.0
     reconcile_interval_sec: float = 60.0
+    quote_retention_days: int = 30
     log_level: str = "INFO"
     env: str = "dev"
+
+    @model_validator(mode="after")
+    def _forbid_weak_prod_secrets(self) -> "Settings":
+        if self.env == "prod" and not self.provider_webhook_secret:
+            raise ValueError("provider_webhook_secret is required in prod")
+        return self
 
     @property
     def database_url(self) -> str:

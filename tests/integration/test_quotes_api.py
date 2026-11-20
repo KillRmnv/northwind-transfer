@@ -166,3 +166,70 @@ async def test_expired_quote_get_returns_410(api, freeze_rates, live_rates, monk
         assert response.status_code == 410
     with check:
         assert response.json()["error"]["code"] == "QUOTE_EXPIRED"
+
+
+async def test_expired_quotes_purged_only_when_unreferenced(session) -> None:
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.tables import Quote, Transfer
+    from app.repositories.quotes import get_quote, purge_expired_quotes
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=60)
+
+    def quote_row(**overrides) -> Quote:
+        base = {
+            "quote_id": uuid.uuid4(),
+            "direction_id": "RU-TH-BANK",
+            "source_amount": Decimal("10000.00"),
+            "source_currency": "RUB",
+            "fee_amount": Decimal("150.00"),
+            "fee_currency": "RUB",
+            "amount_to_convert": Decimal("9850.00"),
+            "rate": Decimal("0.42"),
+            "target_amount": Decimal("4137.00"),
+            "target_currency": "THB",
+            "breakdown": [],
+            "expires_at": old,
+            "created_at": old,
+        }
+        base.update(overrides)
+        return Quote(**base)
+
+    orphan = quote_row()
+    fresh = quote_row(quote_id=uuid.uuid4(), expires_at=now + timedelta(hours=1))
+    linked = quote_row()
+    session.add_all([orphan, fresh, linked])
+    await session.flush()
+    session.add(
+        Transfer(
+            transfer_id=uuid.uuid4(),
+            quote_id=linked.quote_id,
+            client_id="c_001",
+            status="PENDING",
+            source_amount=Decimal("10000.00"),
+            source_currency="RUB",
+            target_amount=Decimal("4137.00"),
+            target_currency="THB",
+            recipient_name="Somchai",
+            recipient_account="123",
+            recipient_bank="BKKB",
+            idempotency_key="key-purge-guard",
+            idempotency_hash="x",
+            created_at=old,
+            updated_at=old,
+        )
+    )
+    await session.commit()
+
+    purged = await purge_expired_quotes(session, now, 30)
+
+    with check:
+        assert purged == 1
+    with check:
+        assert await get_quote(session, orphan.quote_id) is None
+    with check:
+        assert await get_quote(session, fresh.quote_id) is not None
+    with check:
+        assert await get_quote(session, linked.quote_id) is not None

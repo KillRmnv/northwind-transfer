@@ -11,6 +11,7 @@ from app.db.engine import session_factory
 from app.models.tables import Transfer
 from app.repositories import attempts as attempt_repo
 from app.repositories import transfers as transfer_repo
+from app.repositories.quotes import purge_expired_quotes
 from app.services.providers import ProviderClient, confirm_payout
 from app.services.transfer_machine import TERMINAL, TransferStateMachine
 from app.services.transfers import run_attempts_locked as run_attempts
@@ -188,4 +189,8 @@ async def reconcile_pass() -> None:
         if isinstance(batch, dict):
             for key in total:
                 total[key] += batch.get(key, 0)
+    async with session_factory() as session:
+        purged = await purge_expired_quotes(session, now_utc(), settings.quote_retention_days)
+    if purged:
+        total["purged_quotes"] = purged
     logger.info("reconcile pass", extra={"status": total})

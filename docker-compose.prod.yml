@@ -1,0 +1,64 @@
+name: transfer-core
+
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_PROFILE: ${DB_PROFILE:-postgres}
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:?DB_NAME must be set for prod}
+      DB_USER: ${DB_USER:?DB_USER must be set for prod}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set for prod}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data:ro
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uv", "run", "--frozen", "alembic", "upgrade", "head"]
+
+  db:
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:?DB_NAME must be set for prod}
+      POSTGRES_USER: ${DB_USER:?DB_USER must be set for prod}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set for prod}
+
+  mock-provider:
+    ports: !reset []
+    restart: unless-stopped
+
+  api:
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENV: prod
+      DB_PROFILE: ${DB_PROFILE:-postgres}
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:?DB_NAME must be set for prod}
+      DB_USER: ${DB_USER:?DB_USER must be set for prod}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set for prod}
+      DATA_DIR: /data
+      MOCK_PROVIDER_URL: http://mock-provider:9000
+      MIGRATE_ON_START: "false"
+      SEED_ON_START: "false"
+      PROVIDER_WEBHOOK_SECRET: ${PROVIDER_WEBHOOK_SECRET:?PROVIDER_WEBHOOK_SECRET must be set for prod}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      mock-provider:
+        condition: service_healthy

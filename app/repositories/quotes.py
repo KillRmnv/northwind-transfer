@@ -1,6 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.types import QuoteResult
@@ -37,3 +38,18 @@ async def save_quote(
 
 async def get_quote(session: AsyncSession, quote_id: uuid.UUID) -> Quote | None:
     return await session.get(Quote, quote_id)
+
+
+async def purge_expired_quotes(session: AsyncSession, now: datetime, retention_days: int) -> int:
+    """Удаление протухших котировок без переводов: таблица не растёт бесконечно."""
+    from app.models.tables import Transfer
+
+    cutoff = now - timedelta(days=retention_days)
+    result = await session.execute(
+        sa.delete(Quote).where(
+            Quote.expires_at < cutoff,
+            ~sa.exists().where(Transfer.quote_id == Quote.quote_id),
+        )
+    )
+    await session.commit()
+    return result.rowcount or 0

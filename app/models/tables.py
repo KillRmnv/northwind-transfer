@@ -153,7 +153,10 @@ class Quote(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (Index("ix_quotes_direction", "direction_id"),)
+    __table_args__ = (
+        Index("ix_quotes_direction", "direction_id"),
+        Index("ix_quotes_expires_at", "expires_at"),
+    )
 
 
 class Transfer(Base):

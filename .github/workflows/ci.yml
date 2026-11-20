@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: transfer
+          POSTGRES_PASSWORD: transfer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U transfer"
+          --health-interval=3s
+          --health-timeout=3s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Lint
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+
+      - name: Architecture boundaries
+        run: uv run --frozen lint-imports
+
+      - name: Env template sync
+        run: uv run --frozen python scripts/check_env_example.py
+
+      - name: Start mock-provider
+        run: |
+          MOCK_MODE=normal DATA_DIR=data nohup uv run --frozen python -m mock_provider.main > /tmp/mock.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/health && break
+            sleep 2
+          done
+          curl -sf http://localhost:9000/health
+
+      - name: Tests
+        run: DB_HOST=localhost DB_PORT=5432 MOCK_PROVIDER_URL=http://localhost:9000 uv run --frozen pytest -q -p no:cacheprovider
+        env:
+          UV_HTTP_TIMEOUT: 120
+
+      - name: Migrations on clean DB
+        run: DB_HOST=localhost DB_PORT=5432 uv run --frozen alembic upgrade head
+
+      - name: Docker build
+        run: docker build -t transfer-core:ci .
+
+      - name: Release archive check
+        run: |
+          sh scripts/build_archive.sh
+          rm -f transfer-core-*.zip
