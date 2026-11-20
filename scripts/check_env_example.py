@@ -8,7 +8,6 @@ compose/mock/postgres wiring (see COMPOSE_ONLY).
 from __future__ import annotations
 
 import os
-import re
 import sys
 from pathlib import Path
 
